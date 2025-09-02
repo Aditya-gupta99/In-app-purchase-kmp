@@ -1,0 +1,14 @@
+[
+    {
+        "merged": "com.aditya.gupta99.inAppPurchase.in-app-purchase-release-21:/color/common_google_signin_btn_text_light.xml",
+        "source": "com.aditya.gupta99.inAppPurchase.in-app-purchase-play-services-base-18.5.0-4:/color/common_google_signin_btn_text_light.xml"
+    },
+    {
+        "merged": "com.aditya.gupta99.inAppPurchase.in-app-purchase-release-21:/color/common_google_signin_btn_tint.xml",
+        "source": "com.aditya.gupta99.inAppPurchase.in-app-purchase-play-services-base-18.5.0-4:/color/common_google_signin_btn_tint.xml"
+    },
+    {
+        "merged": "com.aditya.gupta99.inAppPurchase.in-app-purchase-release-21:/color/common_google_signin_btn_text_dark.xml",
+        "source": "com.aditya.gupta99.inAppPurchase.in-app-purchase-play-services-base-18.5.0-4:/color/common_google_signin_btn_text_dark.xml"
+    }
+]

@@ -1,0 +1,8 @@
+framework module "in_app_purchase" {
+    umbrella header "in_app_purchase.h"
+
+    export *
+    module * { export * }
+
+    use Foundation
+}

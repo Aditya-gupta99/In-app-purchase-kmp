@@ -1,0 +1,24 @@
+/Users/apple/Desktop/lib/In-app-purchase-kmp/gradle/libs.versions.toml:2: Warning: A newer version of com.android.library than 8.12.2 is available: 8.13.0 [AndroidGradlePluginVersion]
+agp = "8.12.2"
+      ~~~~~~~~
+
+   Explanation for issues of type "AndroidGradlePluginVersion":
+   This detector looks for usage of the Android Gradle Plugin where the
+   version you are using is not the current stable release. Using older
+   versions is fine, and there are cases where you deliberately want to stick
+   with an older version. However, you may simply not be aware that a more
+   recent version is available, and that is what this lint check helps find.
+
+/Users/apple/Desktop/lib/In-app-purchase-kmp/gradle/libs.versions.toml:18: Warning: A newer version of com.vanniktech.maven.publish than 0.29.0 is available: 0.34.0 [NewerVersionAvailable]
+vanniktech-mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.29.0" }
+                                                                           ~~~~~~~~
+
+   Explanation for issues of type "NewerVersionAvailable":
+   This detector checks with a central repository to see if there are newer
+   versions available for the dependencies used by this project. This is
+   similar to the GradleDependency check, which checks for newer versions
+   available in the Android SDK tools and libraries, but this works with any
+   MavenCentral dependency, and connects to the library every time, which
+   makes it more flexible but also much slower.
+
+0 errors, 2 warnings

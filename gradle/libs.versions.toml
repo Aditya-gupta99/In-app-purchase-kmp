@@ -1,11 +1,16 @@
 [versions]
 agp = "8.12.2"
+billingKtx = "8.0.0"
 kotlin = "2.2.10"
 android-minSdk = "28"
 android-compileSdk = "36"
+kotlinxCoroutinesCore = "1.10.2"
+lifecycleProcess = "2.9.3"
 
 [libraries]
-kotlin-test = { module = "org.jetbrains.kotlin:kotlin-test", version.ref = "kotlin" }
+billing-ktx = { module = "com.android.billingclient:billing-ktx", version.ref = "billingKtx" }
+kotlinx-coroutines-core = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinxCoroutinesCore" }
+lifecycle-process = { module = "androidx.lifecycle:lifecycle-process", version.ref = "lifecycleProcess" }
 
 [plugins]
 androidLibrary = { id = "com.android.library", version.ref = "agp" }

@@ -36,14 +36,21 @@ kotlin {
     sourceSets {
         val commonMain by getting {
             dependencies {
-                //put your multiplatform dependencies here
+                implementation(libs.kotlinx.coroutines.core)
+            }
+        }
+
+        val androidMain by getting {
+            dependencies {
+                implementation(libs.billing.ktx)
+                implementation(libs.lifecycle.process)
             }
         }
     }
 }
 
 android {
-    namespace = "com.aditya-gupta99"
+    namespace = "com.aditya.gupta99.inAppPurchase"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
     defaultConfig {
         minSdk = libs.versions.android.minSdk.get().toInt()
