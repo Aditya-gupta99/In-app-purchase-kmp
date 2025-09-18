@@ -8,12 +8,12 @@ plugins {
     alias(libs.plugins.vanniktech.mavenPublish)
 }
 
-group = "io.github.kotlin"
-version = "1.0.0"
+group = "io.github.aditya-gupta99"
+version = "1.0.3"
 
 kotlin {
     androidTarget {
-        publishLibraryVariants("release")
+        publishLibraryVariants("release","debug")
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_11)
@@ -62,35 +62,36 @@ android {
 }
 
 mavenPublishing {
-    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
 
-    signAllPublications()
-
-    coordinates(group.toString(), "library", version.toString())
+    coordinates(group.toString(), "inAppPurchase-kmp", version.toString())
 
     pom {
-        name = "My library"
-        description = "A library."
-        inceptionYear = "2024"
-        url = "https://github.com/kotlin/multiplatform-library-template/"
+        name = "InAppPurchase KMP"
+        description = "A multiplatform library for In-App Purchases"
+        inceptionYear = "2025"
+        url = "https://github.com/Aditya-gupta99/In-app-purchase-kmp"
         licenses {
             license {
-                name = "XXX"
-                url = "YYY"
+                name = "MIT"
+                url = "https://opensource.org/licenses/MIT"
                 distribution = "ZZZ"
             }
         }
         developers {
             developer {
-                id = "XXX"
-                name = "YYY"
-                url = "ZZZ"
+                id = "Aditya-gupta99"
+                name = "Aditya Gupta"
+                url = "https://github.com/Aditya-gupta99"
             }
         }
         scm {
-            url = "XXX"
-            connection = "YYY"
-            developerConnection = "ZZZ"
+            url = "https://github.com/Aditya-gupta99/In-app-purchase-kmp"
         }
     }
+
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+
+    signAllPublications()
 }
+
+task("testClasses") {}

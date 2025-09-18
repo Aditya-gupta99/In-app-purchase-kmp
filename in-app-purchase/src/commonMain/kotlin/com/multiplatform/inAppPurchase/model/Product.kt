@@ -14,5 +14,5 @@ data class Product(
 
     val priceAmountMicros: Long,
 
-    val type: ProductType
+    val type: String
 )

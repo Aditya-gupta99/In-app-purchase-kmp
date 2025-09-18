@@ -89,10 +89,19 @@ actual class IAPManager actual constructor() {
 
             client.queryProductDetailsAsync(params) { billingResult, productDetailsList ->
                 if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-
-                    // TODO : Implement this in future
-
-//                continuation.resume(IAPResult.Success(Unit))
+                    continuation.resume(IAPResult.Success(productDetailsList.productDetailsList.map {
+                        Product(
+                            id = it.productId,
+                            title = it.title,
+                            description = it.description,
+                            price = it.oneTimePurchaseOfferDetails?.formattedPrice ?: "",
+                            priceCurrencyCode = it.oneTimePurchaseOfferDetails?.priceCurrencyCode
+                                ?: "",
+                            priceAmountMicros = it.oneTimePurchaseOfferDetails?.priceAmountMicros
+                                ?: 0,
+                            type = it.productType
+                        )
+                    }))
                 } else {
                     continuation.resume(
                         IAPResult.Error(
