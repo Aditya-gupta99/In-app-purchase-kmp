@@ -10,5 +10,9 @@ data class Purchase(
 
     val purchaseTime: Long,
 
-    val isAcknowledged: Boolean
+    val isAcknowledged: Boolean,
+
+    val originalJson : String,
+
+    val signature : String
 )

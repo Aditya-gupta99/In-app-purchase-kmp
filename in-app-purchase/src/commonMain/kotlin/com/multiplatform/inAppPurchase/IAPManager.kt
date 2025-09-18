@@ -11,7 +11,7 @@ expect class IAPManager() {
 
     suspend fun getProducts(productIds: List<String>): IAPResult<List<Product>>
 
-    suspend fun purchaseProduct(purchase: Purchase): IAPResult<Purchase>
+    suspend fun launchPurchaseFlow(product: Product): IAPResult<Unit>
 
     suspend fun consumePurchase(purchase: Purchase): IAPResult<Unit>
 

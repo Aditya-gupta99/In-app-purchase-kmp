@@ -14,7 +14,7 @@ actual class IAPManager actual constructor() {
         TODO("Not yet implemented")
     }
 
-    actual suspend fun purchaseProduct(purchase: Purchase): IAPResult<Purchase> {
+    actual suspend fun launchPurchaseFlow(product: Product): IAPResult<Unit> {
         TODO("Not yet implemented")
     }
 
