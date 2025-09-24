@@ -1,4 +1,3 @@
-.gradle
 # Gradle
 .gradle/
 **/build/
@@ -11,6 +10,7 @@ local.properties
 
 # OS
 .DS_Store
+**/.DS_Store
 Thumbs.db
 
 # Secrets & Credentials
