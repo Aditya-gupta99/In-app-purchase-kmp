@@ -1,490 +1,393 @@
-// File: shared/src/iosMain/kotlin/com/multiplatform/inAppPurchase/IAPManager.ios.kt
 package com.multiplatform.inAppPurchase
 
 import com.multiplatform.inAppPurchase.model.IAPResult
 import com.multiplatform.inAppPurchase.model.Product
 import com.multiplatform.inAppPurchase.model.Purchase
+import com.multiplatform.storekit.*
 import kotlinx.cinterop.*
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
-import platform.Foundation.*
-import platform.StoreKit.*
-import platform.darwin.NSObject
+import platform.Foundation.NSArray
+import platform.Foundation.NSMutableArray
 import kotlin.coroutines.resume
 
 @OptIn(ExperimentalForeignApi::class)
 actual class IAPManager actual constructor() {
 
-    private var paymentQueue: SKPaymentQueue? = null
-    private var productsRequest: SKProductsRequest? = null
-    private var productDetailsCache = mutableMapOf<String, SKProduct>()
-    private var isInitialized = false
     private var purchaseUpdatesCallback: ((Purchase) -> Unit)? = null
-
-    // Keep strong references to delegates to prevent garbage collection
-    private var currentProductsDelegate: ProductsRequestDelegate? = null
-
-    // StoreKit delegate for handling products request
-    private class ProductsRequestDelegate : NSObject(), SKProductsRequestDelegateProtocol {
-        var onSuccess: ((SKProductsResponse) -> Unit)? = null
-        var onError: ((NSError) -> Unit)? = null
-
-        override fun productsRequest(request: SKProductsRequest, didReceiveResponse: SKProductsResponse) {
-            onSuccess?.invoke(didReceiveResponse)
-        }
-
-        override fun request(request: SKRequest, didFailWithError: NSError) {
-            onError?.invoke(didFailWithError)
-        }
-    }
-
-    // Payment transaction observer
-    private class PaymentTransactionObserver : NSObject(), SKPaymentTransactionObserverProtocol {
-        var purchaseUpdatesCallback: ((SKPaymentTransaction) -> Unit)? = null
-        var restoreCompletedCallback: ((List<SKPaymentTransaction>) -> Unit)? = null
-        var restoreFailedCallback: ((NSError) -> Unit)? = null
-
-        private val restoredTransactions = mutableListOf<SKPaymentTransaction>()
-
-        override fun paymentQueue(queue: SKPaymentQueue, updatedTransactions: List<*>) {
-            println("🔄 [IAP] Payment queue updated with ${updatedTransactions.size} transactions")
-
-            updatedTransactions.forEach { transaction ->
-                if (transaction is SKPaymentTransaction) {
-                    val productId = transaction.payment.productIdentifier
-                    val transactionId = transaction.transactionIdentifier
-                    val state = transaction.transactionState
-
-                    println("📋 [IAP] Processing transaction:")
-                    println("   Product ID: $productId")
-                    println("   Transaction ID: $transactionId")
-                    println("   State: $state")
-
-                    when (state) {
-                        SKPaymentTransactionState.SKPaymentTransactionStatePurchased -> {
-                            println("✅ [IAP] Transaction PURCHASED: $productId")
-                            purchaseUpdatesCallback?.invoke(transaction)
-                            println("🏁 [IAP] Finishing successful transaction: $transactionId")
-                            queue.finishTransaction(transaction)
-                        }
-                        SKPaymentTransactionState.SKPaymentTransactionStateRestored -> {
-                            println("♻️ [IAP] Transaction RESTORED: $productId")
-                            restoredTransactions.add(transaction)
-                            purchaseUpdatesCallback?.invoke(transaction)
-                        }
-                        SKPaymentTransactionState.SKPaymentTransactionStateFailed -> {
-                            println("❌ [IAP] Transaction FAILED: $productId")
-                            handleFailedTransaction(transaction, queue)
-                        }
-                        SKPaymentTransactionState.SKPaymentTransactionStatePurchasing -> {
-                            println("🔄 [IAP] Transaction PURCHASING: $productId")
-                        }
-                        SKPaymentTransactionState.SKPaymentTransactionStateDeferred -> {
-                            println("⏳ [IAP] Transaction DEFERRED: $productId")
-                        }
-                        else -> {
-                            println("❓ [IAP] Transaction UNKNOWN STATE ($state): $productId")
-                        }
-                    }
-                } else {
-                    println("⚠️ [IAP] Received non-SKPaymentTransaction object: $transaction")
-                }
-            }
-        }
-
-        override fun paymentQueue(queue: SKPaymentQueue, restoreCompletedTransactionsFailedWithError: NSError) {
-            println("❌ [IAP] Restore transactions failed:")
-            println("   Error: ${restoreCompletedTransactionsFailedWithError.localizedDescription}")
-            println("   Code: ${restoreCompletedTransactionsFailedWithError.code}")
-
-            restoreFailedCallback?.invoke(restoreCompletedTransactionsFailedWithError)
-        }
-
-        override fun paymentQueueRestoreCompletedTransactionsFinished(queue: SKPaymentQueue) {
-            println("✅ [IAP] Restore transactions completed")
-            println("   Restored ${restoredTransactions.size} transactions")
-
-            restoreCompletedCallback?.invoke(restoredTransactions.toList())
-            restoredTransactions.clear()
-        }
-
-        private fun handleFailedTransaction(transaction: SKPaymentTransaction, queue: SKPaymentQueue) {
-            val error = transaction.error
-            val productId = transaction.payment.productIdentifier
-            val transactionId = transaction.transactionIdentifier
-
-            println("❌ [IAP] Handling failed transaction:")
-            println("   Product ID: $productId")
-            println("   Transaction ID: $transactionId")
-
-            if (error != null) {
-                val nsError = error as NSError
-                val errorCode = nsError.code
-                val errorDomain = nsError.domain
-                val errorDescription = nsError.localizedDescription
-
-                println("   Error Code: $errorCode")
-                println("   Error Domain: $errorDomain")
-                println("   Error Description: $errorDescription")
-
-                // Check if user cancelled
-                if (errorCode == 2L) { // SKErrorPaymentCancelled
-                    println("👤 [IAP] Purchase cancelled by user: $productId")
-                } else {
-                    println("💥 [IAP] Purchase failed with error: $productId - $errorDescription")
-                }
-            } else {
-                println("❓ [IAP] Transaction failed but no error provided")
-            }
-
-            println("🏁 [IAP] Finishing failed transaction: $transactionId")
-            queue.finishTransaction(transaction)
-        }
-    }
-
-    private val paymentTransactionObserver = PaymentTransactionObserver()
+    private var isInitialized = false
 
     /**
-     * Initialize StoreKit
+     * Initialize StoreKit 2
      */
     actual suspend fun initialize(): IAPResult<Unit> = suspendCancellableCoroutine { continuation ->
-        try {
-            println("🚀 [IAP] Starting StoreKit initialization...")
+        println("🚀 [IAP] Starting StoreKit 2 initialization...")
 
-            if (!SKPaymentQueue.canMakePayments()) {
-                println("❌ [IAP] In-app purchases are disabled on this device")
-                continuation.resume(IAPResult.Error("In-app purchases are disabled"))
-                return@suspendCancellableCoroutine
+        val callback: StoreKitInitCallback = staticCFunction { result ->
+            val manager = StableRef.create(continuation).asCPointer()
+            val cont = manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().get()
+
+            if (result.success) {
+                println("✅ [IAP] StoreKit 2 initialization completed successfully")
+                cont.resume(IAPResult.Success(Unit))
+            } else {
+                val errorMessage = result.errorMessage ?: "Unknown error"
+                println("❌ [IAP] StoreKit 2 initialization failed: $errorMessage")
+                cont.resume(IAPResult.Error(errorMessage, result.errorCode))
             }
 
-            println("✅ [IAP] Device supports in-app purchases")
+            manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().dispose()
+        }
 
-            paymentQueue = SKPaymentQueue.defaultQueue()
-            paymentQueue?.addTransactionObserver(paymentTransactionObserver)
-
-            println("✅ [IAP] Transaction observer added to payment queue")
-
+        try {
+            storekit_initialize(callback)
             isInitialized = true
-            println("🎉 [IAP] StoreKit initialization completed successfully")
-            continuation.resume(IAPResult.Success(Unit))
         } catch (e: Exception) {
-            println("❌ [IAP] StoreKit initialization failed: ${e.message}")
-            continuation.resume(IAPResult.Error("Failed to initialize StoreKit: ${e.message}"))
+            println("❌ [IAP] Failed to initialize StoreKit 2: ${e.message}")
+            continuation.resume(IAPResult.Error("Failed to initialize StoreKit 2: ${e.message}"))
         }
     }
 
     /**
-     * Query product details from App Store
+     * Query product details from App Store using StoreKit 2
      */
     actual suspend fun getProducts(productIds: List<String>): IAPResult<List<Product>> =
         suspendCancellableCoroutine { continuation ->
             println("🛒 [IAP] Starting product query for IDs: $productIds")
 
             if (!isInitialized) {
-                println("❌ [IAP] Cannot query products - StoreKit not initialized")
-                continuation.resume(IAPResult.Error("StoreKit not initialized"))
+                println("❌ [IAP] Cannot query products - StoreKit 2 not initialized")
+                continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
                 return@suspendCancellableCoroutine
             }
 
-            try {
-                // Create NSSet from productIds list
-                val productIdentifiers = NSSet.setWithArray(productIds)
-                println("🔄 [IAP] Created NSSet with ${productIdentifiers.count()} product identifiers")
+            val callback: StoreKitProductsCallback = staticCFunction { result ->
+                val manager = StableRef.create(continuation).asCPointer()
+                val cont = manager.asStableRef<CancellableContinuation<IAPResult<List<Product>>>>().get()
 
-                val request = SKProductsRequest(productIdentifiers)
-                println("🔄 [IAP] Created SKProductsRequest")
-
-                val delegate = ProductsRequestDelegate()
-                delegate.onSuccess = { response ->
-                    println("✅ [IAP] Products request completed successfully")
-
+                if (result.success) {
                     try {
                         val products = mutableListOf<Product>()
 
-                        // Process valid products
-                        val validProducts = response.products
-                        val validCount = validProducts.count()
-                        println("📦 [IAP] Found $validCount valid products")
+                        result.data?.let { data ->
+                            if (data is NSArray) {
+                                val count = data.count()
+                                println("📦 [IAP] Found ${count} products")
 
-                        for (i in 0 until validCount) {
-                            val skProduct = validProducts[i] as? SKProduct
-                            skProduct?.let { product ->
-                                println("📦 [IAP] Processing product: ${product.productIdentifier}")
-                                println("   Title: ${product.localizedTitle}")
-                                println("   Description: ${product.localizedDescription}")
-                                println("   Price: ${product.price}")
-                                println("   Currency: ${product.priceLocale.currencyCode}")
-
-                                // Cache for later purchase
-                                productDetailsCache[product.productIdentifier] = product
-
-                                // Create formatter for price
-                                val formatter = NSNumberFormatter().apply {
-                                    numberStyle = NSNumberFormatterCurrencyStyle
-                                    locale = product.priceLocale
-                                }
-
-                                val formattedPrice = formatter.stringFromNumber(product.price) ?: product.price.stringValue
-                                println("   Formatted Price: $formattedPrice")
-
-                                val productItem = Product(
-                                    id = product.productIdentifier,
-                                    title = product.localizedTitle,
-                                    description = product.localizedDescription,
-                                    price = formattedPrice,
-                                    priceCurrencyCode = product.priceLocale.currencyCode ?: "",
-                                    priceAmountMicros = (product.price.doubleValue * 1_000_000).toLong(),
-                                    type = "inapp"
-                                )
-                                products.add(productItem)
-                                println("✅ [IAP] Added product to results: ${product.productIdentifier}")
-                            }
-                        }
-
-                        // Log invalid product IDs for debugging
-                        val invalidProductIds = response.invalidProductIdentifiers
-                        val invalidCount = invalidProductIds.count()
-
-                        if (invalidCount > 0) {
-                            println("⚠️ [IAP] Found $invalidCount invalid product IDs:")
-                            for (i in 0 until invalidCount) {
-                                val invalidId = invalidProductIds[i] as? String
-                                invalidId?.let {
-                                    println("   ❌ Invalid: $it")
+                                for (i in 0 until count) {
+                                    val item = data.objectAtIndex(i.toULong())
+                                    if (item is StoreKitProduct) {
+                                        val product = Product(
+                                            id = item.id,
+                                            title = item.displayName,
+                                            description = item.description,
+                                            price = item.price,
+                                            priceCurrencyCode = item.currencyCode,
+                                            priceAmountMicros = item.priceAmountMicros,
+                                            type = item.type
+                                        )
+                                        products.add(product)
+                                        println("✅ [IAP] Added product: ${item.id}")
+                                    }
                                 }
                             }
-                        } else {
-                            println("✅ [IAP] All product IDs are valid")
                         }
 
                         println("🎉 [IAP] Product query completed - returning ${products.size} products")
-                        continuation.resume(IAPResult.Success(products))
-                        currentProductsDelegate = null
+                        cont.resume(IAPResult.Success(products))
                     } catch (e: Exception) {
                         println("❌ [IAP] Error parsing products: ${e.message}")
-                        continuation.resume(IAPResult.Error("Failed to parse products: ${e.message}"))
-                        currentProductsDelegate = null
+                        cont.resume(IAPResult.Error("Failed to parse products: ${e.message}"))
                     }
+                } else {
+                    val errorMessage = result.errorMessage ?: "Unknown error"
+                    println("❌ [IAP] Product query failed: $errorMessage")
+                    cont.resume(IAPResult.Error(errorMessage, result.errorCode))
                 }
 
-                delegate.onError = { error ->
-                    println("❌ [IAP] Products request failed:")
-                    println("   Error: ${error.localizedDescription}")
-                    println("   Code: ${error.code}")
-                    println("   Domain: ${error.domain}")
+                manager.asStableRef<CancellableContinuation<IAPResult<List<Product>>>>().dispose()
+            }
 
-                    continuation.resume(
-                        IAPResult.Error(
-                            "Failed to query products: ${error.localizedDescription}",
-                            error.code.toInt()
-                        )
-                    )
-                    currentProductsDelegate = null
+            // Convert Kotlin strings to C strings
+            memScoped {
+                val cStringArray = allocArray<CPointerVar<ByteVar>>(productIds.size)
+                productIds.forEachIndexed { index, productId ->
+                    cStringArray[index] = productId.cstr.ptr
                 }
 
-                // Keep strong reference to prevent garbage collection
-                currentProductsDelegate = delegate
-                request.delegate = delegate
-
-                println("🚀 [IAP] Starting products request...")
-                request.start()
-
-                // Store reference to avoid garbage collection
-                productsRequest = request
-
-            } catch (e: Exception) {
-                println("❌ [IAP] Failed to create product request: ${e.message}")
-                continuation.resume(IAPResult.Error("Failed to create product request: ${e.message}"))
+                storekit_get_products(cStringArray, productIds.size, callback)
             }
         }
 
     /**
-     * Launch purchase flow for a product
+     * Launch purchase flow for a product using StoreKit 2
      */
     actual suspend fun launchPurchaseFlow(product: Product): IAPResult<Unit> =
         suspendCancellableCoroutine { continuation ->
             println("💳 [IAP] Starting purchase flow for product: ${product.id}")
 
             if (!isInitialized) {
-                println("❌ [IAP] Cannot launch purchase - StoreKit not initialized")
-                continuation.resume(IAPResult.Error("StoreKit not initialized"))
+                println("❌ [IAP] Cannot launch purchase - StoreKit 2 not initialized")
+                continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
                 return@suspendCancellableCoroutine
             }
 
-            val skProduct = productDetailsCache[product.id]
-            if (skProduct == null) {
-                println("❌ [IAP] Product not found in cache: ${product.id}")
-                println("   Available products in cache: ${productDetailsCache.keys}")
-                continuation.resume(IAPResult.Error("Product not found: ${product.id}. Call getProducts first."))
-                return@suspendCancellableCoroutine
+            val callback: StoreKitPurchaseCallback = staticCFunction { result ->
+                val manager = StableRef.create(continuation).asCPointer()
+                val cont = manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().get()
+
+                if (result.success) {
+                    println("✅ [IAP] Purchase flow completed successfully")
+                    cont.resume(IAPResult.Success(Unit))
+                } else {
+                    val errorMessage = result.errorMessage ?: "Unknown error"
+                    println("❌ [IAP] Purchase flow failed: $errorMessage")
+
+                    // Handle specific error codes
+                    val errorCode = result.errorCode
+                    when (errorCode) {
+                        2 -> cont.resume(IAPResult.Error("Purchase cancelled by user", errorCode))
+                        3 -> cont.resume(IAPResult.Error("Purchase is pending approval", errorCode))
+                        else -> cont.resume(IAPResult.Error(errorMessage, errorCode))
+                    }
+                }
+
+                manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().dispose()
             }
 
-            try {
-                println("🔄 [IAP] Creating payment for product: ${skProduct.productIdentifier}")
-                println("   Product title: ${skProduct.localizedTitle}")
-                println("   Product price: ${skProduct.price}")
-
-                val payment = SKPayment.paymentWithProduct(skProduct)
-                println("✅ [IAP] Payment object created successfully")
-
-                println("🚀 [IAP] Adding payment to queue...")
-                paymentQueue?.addPayment(payment)
-
-                // The actual purchase result will be delivered via the transaction observer
-                println("✅ [IAP] Payment added to queue - waiting for transaction updates")
-                continuation.resume(IAPResult.Success(Unit))
-            } catch (e: Exception) {
-                println("❌ [IAP] Failed to launch purchase flow: ${e.message}")
-                continuation.resume(IAPResult.Error("Failed to launch purchase flow: ${e.message}"))
+            product.id.cstr.getPointer(memScope).let { productIdPtr ->
+                storekit_launch_purchase_flow(productIdPtr, callback)
             }
         }
 
     /**
-     * Consume a purchase (finish transaction for iOS)
+     * Consume a purchase (automatic in StoreKit 2)
      */
-    actual suspend fun consumePurchase(purchase: Purchase): IAPResult<Unit> {
-        // For iOS, consuming is handled automatically when transaction is finished
-        return IAPResult.Success(Unit)
-    }
+    actual suspend fun consumePurchase(purchase: Purchase): IAPResult<Unit> =
+        suspendCancellableCoroutine { continuation ->
+            println("🔄 [IAP] Consuming purchase: ${purchase.productId}")
+
+            val callback: StoreKitPurchaseCallback = staticCFunction { result ->
+                val manager = StableRef.create(continuation).asCPointer()
+                val cont = manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().get()
+
+                if (result.success) {
+                    println("✅ [IAP] Purchase consumed successfully")
+                    cont.resume(IAPResult.Success(Unit))
+                } else {
+                    val errorMessage = result.errorMessage ?: "Unknown error"
+                    println("❌ [IAP] Failed to consume purchase: $errorMessage")
+                    cont.resume(IAPResult.Error(errorMessage, result.errorCode))
+                }
+
+                manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().dispose()
+            }
+
+            purchase.purchaseToken.cstr.getPointer(memScope).let { tokenPtr ->
+                storekit_consume_purchase(tokenPtr, callback)
+            }
+        }
 
     /**
-     * Acknowledge a purchase (finish transaction for iOS)
+     * Acknowledge a purchase (automatic in StoreKit 2)
      */
-    actual suspend fun acknowledgePurchase(purchase: Purchase): IAPResult<Unit> {
-        // Similar to consume - in iOS you finish the transaction
-        // The transaction finishing should happen in the transaction observer
-        return IAPResult.Success(Unit)
-    }
+    actual suspend fun acknowledgePurchase(purchase: Purchase): IAPResult<Unit> =
+        suspendCancellableCoroutine { continuation ->
+            println("🔄 [IAP] Acknowledging purchase: ${purchase.productId}")
+
+            val callback: StoreKitPurchaseCallback = staticCFunction { result ->
+                val manager = StableRef.create(continuation).asCPointer()
+                val cont = manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().get()
+
+                if (result.success) {
+                    println("✅ [IAP] Purchase acknowledged successfully")
+                    cont.resume(IAPResult.Success(Unit))
+                } else {
+                    val errorMessage = result.errorMessage ?: "Unknown error"
+                    println("❌ [IAP] Failed to acknowledge purchase: $errorMessage")
+                    cont.resume(IAPResult.Error(errorMessage, result.errorCode))
+                }
+
+                manager.asStableRef<CancellableContinuation<IAPResult<Unit>>>().dispose()
+            }
+
+            purchase.purchaseToken.cstr.getPointer(memScope).let { tokenPtr ->
+                storekit_acknowledge_purchase(tokenPtr, callback)
+            }
+        }
 
     /**
-     * Get current purchases (restored transactions)
+     * Get current purchases using StoreKit 2
      */
     actual suspend fun getPurchases(): IAPResult<List<Purchase>> =
         suspendCancellableCoroutine { continuation ->
+            println("📋 [IAP] Getting current purchases")
+
             if (!isInitialized) {
-                continuation.resume(IAPResult.Error("StoreKit not initialized"))
+                continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
                 return@suspendCancellableCoroutine
             }
 
-            val purchases = mutableListOf<Purchase>()
-            var isCompleted = false
+            val callback: StoreKitProductsCallback = staticCFunction { result ->
+                val manager = StableRef.create(continuation).asCPointer()
+                val cont = manager.asStableRef<CancellableContinuation<IAPResult<List<Purchase>>>>().get()
 
-            val observer = object : NSObject(), SKPaymentTransactionObserverProtocol {
-                override fun paymentQueue(queue: SKPaymentQueue, updatedTransactions: List<*>) {
-                    updatedTransactions.forEach { transaction ->
-                        if (transaction is SKPaymentTransaction) {
-                            when (transaction.transactionState) {
-                                SKPaymentTransactionState.SKPaymentTransactionStateRestored,
-                                SKPaymentTransactionState.SKPaymentTransactionStatePurchased -> {
-                                    val purchase = transaction.toCommonPurchase()
-                                    purchases.add(purchase)
+                if (result.success) {
+                    try {
+                        val purchases = mutableListOf<Purchase>()
+
+                        result.data?.let { data ->
+                            if (data is NSArray) {
+                                val count = data.count()
+                                println("📦 [IAP] Found ${count} purchases")
+
+                                for (i in 0 until count) {
+                                    val item = data.objectAtIndex(i.toULong())
+                                    if (item is StoreKitPurchase) {
+                                        val purchase = Purchase(
+                                            productId = item.productId,
+                                            purchaseToken = item.purchaseToken,
+                                            orderId = item.orderId,
+                                            purchaseTime = item.purchaseTime,
+                                            isAcknowledged = item.isAcknowledged,
+                                            originalJson = item.originalJson,
+                                            signature = item.signature
+                                        )
+                                        purchases.add(purchase)
+                                        println("✅ [IAP] Added purchase: ${item.productId}")
+                                    }
                                 }
-                                else -> {}
                             }
                         }
+
+                        println("🎉 [IAP] Get purchases completed - returning ${purchases.size} purchases")
+                        cont.resume(IAPResult.Success(purchases))
+                    } catch (e: Exception) {
+                        println("❌ [IAP] Error parsing purchases: ${e.message}")
+                        cont.resume(IAPResult.Error("Failed to parse purchases: ${e.message}"))
                     }
+                } else {
+                    val errorMessage = result.errorMessage ?: "Unknown error"
+                    println("❌ [IAP] Get purchases failed: $errorMessage")
+                    cont.resume(IAPResult.Error(errorMessage, result.errorCode))
                 }
 
-                override fun paymentQueueRestoreCompletedTransactionsFinished(queue: SKPaymentQueue) {
-                    if (!isCompleted) {
-                        isCompleted = true
-                        queue.removeTransactionObserver(this)
-                        continuation.resume(IAPResult.Success(purchases.toList()))
-                    }
-                }
-
-                override fun paymentQueue(queue: SKPaymentQueue, restoreCompletedTransactionsFailedWithError: NSError) {
-                    if (!isCompleted) {
-                        isCompleted = true
-                        queue.removeTransactionObserver(this)
-                        continuation.resume(
-                            IAPResult.Error(
-                                "Failed to get purchases: ${restoreCompletedTransactionsFailedWithError.localizedDescription}",
-                                restoreCompletedTransactionsFailedWithError.code.toInt()
-                            )
-                        )
-                    }
-                }
+                manager.asStableRef<CancellableContinuation<IAPResult<List<Purchase>>>>().dispose()
             }
 
-            paymentQueue?.addTransactionObserver(observer)
-            paymentQueue?.restoreCompletedTransactions()
+            storekit_get_purchases(callback)
         }
 
     /**
-     * Restore purchases
+     * Restore purchases using StoreKit 2
      */
     actual suspend fun restorePurchases(): IAPResult<List<Purchase>> =
         suspendCancellableCoroutine { continuation ->
+            println("♻️ [IAP] Restoring purchases")
+
             if (!isInitialized) {
-                continuation.resume(IAPResult.Error("StoreKit not initialized"))
+                continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
                 return@suspendCancellableCoroutine
             }
 
-            val restoredPurchases = mutableListOf<Purchase>()
+            val callback: StoreKitProductsCallback = staticCFunction { result ->
+                val manager = StableRef.create(continuation).asCPointer()
+                val cont = manager.asStableRef<CancellableContinuation<IAPResult<List<Purchase>>>>().get()
 
-            paymentTransactionObserver.restoreCompletedCallback = { transactions ->
-                transactions.forEach { transaction ->
-                    val purchase = transaction.toCommonPurchase()
-                    restoredPurchases.add(purchase)
-                    // Finish the restored transaction
-                    paymentQueue?.finishTransaction(transaction)
+                if (result.success) {
+                    try {
+                        val purchases = mutableListOf<Purchase>()
+
+                        result.data?.let { data ->
+                            if (data is NSArray) {
+                                val count = data.count()
+                                println("📦 [IAP] Restored ${count} purchases")
+
+                                for (i in 0 until count) {
+                                    val item = data.objectAtIndex(i.toULong())
+                                    if (item is StoreKitPurchase) {
+                                        val purchase = Purchase(
+                                            productId = item.productId,
+                                            purchaseToken = item.purchaseToken,
+                                            orderId = item.orderId,
+                                            purchaseTime = item.purchaseTime,
+                                            isAcknowledged = item.isAcknowledged,
+                                            originalJson = item.originalJson,
+                                            signature = item.signature
+                                        )
+                                        purchases.add(purchase)
+                                        println("✅ [IAP] Restored purchase: ${item.productId}")
+                                    }
+                                }
+                            }
+                        }
+
+                        println("🎉 [IAP] Restore purchases completed - returning ${purchases.size} purchases")
+                        cont.resume(IAPResult.Success(purchases))
+                    } catch (e: Exception) {
+                        println("❌ [IAP] Error parsing restored purchases: ${e.message}")
+                        cont.resume(IAPResult.Error("Failed to parse restored purchases: ${e.message}"))
+                    }
+                } else {
+                    val errorMessage = result.errorMessage ?: "Unknown error"
+                    println("❌ [IAP] Restore purchases failed: $errorMessage")
+                    cont.resume(IAPResult.Error(errorMessage, result.errorCode))
                 }
-                continuation.resume(IAPResult.Success(restoredPurchases.toList()))
 
-                // Clean up callbacks
-                paymentTransactionObserver.restoreCompletedCallback = null
-                paymentTransactionObserver.restoreFailedCallback = null
+                manager.asStableRef<CancellableContinuation<IAPResult<List<Purchase>>>>().dispose()
             }
 
-            paymentTransactionObserver.restoreFailedCallback = { error ->
-                continuation.resume(
-                    IAPResult.Error(
-                        "Failed to restore purchases: ${error.localizedDescription}",
-                        error.code.toInt()
-                    )
-                )
-
-                // Clean up callbacks
-                paymentTransactionObserver.restoreCompletedCallback = null
-                paymentTransactionObserver.restoreFailedCallback = null
-            }
-
-            paymentQueue?.restoreCompletedTransactions()
+            storekit_restore_purchases(callback)
         }
 
     /**
-     * Flow of purchase updates
+     * Flow of purchase updates using StoreKit 2
      */
     actual fun getPurchaseUpdates(): Flow<Purchase> = callbackFlow {
         println("📡 [IAP] Setting up purchase updates flow")
 
-        val originalCallback = paymentTransactionObserver.purchaseUpdatesCallback
+        val callback: StoreKitPurchaseUpdateCallback = staticCFunction { purchase ->
+            val channelRef = StableRef.create(this@callbackFlow).asCPointer()
+            val channel = channelRef.asStableRef<ProducerScope<Purchase>>().get()
 
-        paymentTransactionObserver.purchaseUpdatesCallback = { transaction ->
             try {
-                println("📦 [IAP] Processing purchase update for: ${transaction.payment.productIdentifier}")
-                val purchase = transaction.toCommonPurchase()
+                println("📦 [IAP] Processing purchase update for: ${purchase.productId}")
+
+                val commonPurchase = Purchase(
+                    productId = purchase.productId,
+                    purchaseToken = purchase.purchaseToken,
+                    orderId = purchase.orderId,
+                    purchaseTime = purchase.purchaseTime,
+                    isAcknowledged = purchase.isAcknowledged,
+                    originalJson = purchase.originalJson,
+                    signature = purchase.signature
+                )
 
                 println("✅ [IAP] Created Purchase object:")
-                println("   Product ID: ${purchase.productId}")
-                println("   Purchase Token: ${purchase.purchaseToken}")
-                println("   Order ID: ${purchase.orderId}")
-                println("   Purchase Time: ${purchase.purchaseTime}")
-                println("   Is Acknowledged: ${purchase.isAcknowledged}")
+                println("   Product ID: ${commonPurchase.productId}")
+                println("   Purchase Token: ${commonPurchase.purchaseToken}")
+                println("   Order ID: ${commonPurchase.orderId}")
+                println("   Purchase Time: ${commonPurchase.purchaseTime}")
+                println("   Is Acknowledged: ${commonPurchase.isAcknowledged}")
 
-                val success = trySend(purchase).isSuccess
+                val success = channel.trySend(commonPurchase).isSuccess
                 println("📤 [IAP] Sent purchase update to flow: $success")
             } catch (e: Exception) {
                 println("❌ [IAP] Error processing purchase update: ${e.message}")
             }
+
+            // Don't dispose here as callback might be called multiple times
         }
+
+        // Set the callback
+        storekit_set_purchase_update_callback(callback)
 
         awaitClose {
             println("🔌 [IAP] Closing purchase updates flow")
-            paymentTransactionObserver.purchaseUpdatesCallback = originalCallback
+            // Clear the callback by setting it to null equivalent
+            storekit_set_purchase_update_callback(staticCFunction { _ -> })
         }
     }
 
@@ -492,29 +395,10 @@ actual class IAPManager actual constructor() {
      * Disconnect and cleanup
      */
     actual suspend fun disconnect() {
-        paymentQueue?.removeTransactionObserver(paymentTransactionObserver)
-        paymentQueue = null
-        productsRequest = null
-        productDetailsCache.clear()
-        paymentTransactionObserver.purchaseUpdatesCallback = null
-        paymentTransactionObserver.restoreCompletedCallback = null
-        paymentTransactionObserver.restoreFailedCallback = null
-        currentProductsDelegate = null
+        println("🔌 [IAP] Disconnecting StoreKit 2")
+        storekit_disconnect()
+        purchaseUpdatesCallback = null
         isInitialized = false
-    }
-
-    /**
-     * Helper function to convert SKPaymentTransaction to common Purchase model
-     */
-    private fun SKPaymentTransaction.toCommonPurchase(): Purchase {
-        return Purchase(
-            productId = this.payment.productIdentifier,
-            purchaseToken = this.transactionIdentifier ?: "",
-            orderId = this.transactionIdentifier ?: "",
-            purchaseTime = (this.transactionDate?.timeIntervalSince1970?.toLong() ?: 0) * 1000,
-            isAcknowledged = true, // iOS doesn't have acknowledged state like Android
-            originalJson = "", // iOS doesn't provide original JSON like Android
-            signature = "" // iOS doesn't provide signature like Android
-        )
+        println("✅ [IAP] StoreKit 2 disconnected")
     }
 }

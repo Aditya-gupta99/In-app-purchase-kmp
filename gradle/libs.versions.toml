@@ -1,11 +1,13 @@
 [versions]
 agp = "8.12.2"
 billingKtx = "8.0.0"
-kotlin = "2.2.10"
+kotlin = "2.2.20"
 android-minSdk = "28"
 android-compileSdk = "36"
 kotlinxCoroutinesCore = "1.10.2"
 lifecycleProcess = "2.9.3"
+vanniktech = "0.31.0"
+swiftklib = "0.6.4"
 
 [libraries]
 billing-ktx = { module = "com.android.billingclient:billing-ktx", version.ref = "billingKtx" }
@@ -15,4 +17,5 @@ lifecycle-process = { module = "androidx.lifecycle:lifecycle-process", version.r
 [plugins]
 androidLibrary = { id = "com.android.library", version.ref = "agp" }
 kotlinMultiplatform = { id = "org.jetbrains.kotlin.multiplatform", version.ref = "kotlin" }
-vanniktech-mavenPublish = { id = "com.vanniktech.maven.publish", version = "0.31.0" }
+vanniktech-mavenPublish = { id = "com.vanniktech.maven.publish", version.ref = "vanniktech" }
+swiftklib = { id = "io.github.ttypic.swiftklib", version.ref = "swiftklib" }

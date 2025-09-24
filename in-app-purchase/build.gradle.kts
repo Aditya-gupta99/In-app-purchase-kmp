@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.kotlinMultiplatform)
     alias(libs.plugins.androidLibrary)
     alias(libs.plugins.vanniktech.mavenPublish)
+    alias(libs.plugins.swiftklib)
 }
 
 group = "io.github.aditya-gupta99"
@@ -13,7 +14,7 @@ version = "1.0.7"
 
 kotlin {
     androidTarget {
-        publishLibraryVariants("release","debug")
+        publishLibraryVariants("release", "debug")
         @OptIn(ExperimentalKotlinGradlePluginApi::class)
         compilerOptions {
             jvmTarget.set(JvmTarget.JVM_11)
@@ -27,7 +28,14 @@ kotlin {
     ).forEach {
         it.binaries.framework {
             baseName = "in-app-purchase"
-            isStatic = true
+            isStatic = false
+        }
+        it.compilations {
+            val main by getting {
+                cinterops {
+                    create("StoreKitManager")
+                }
+            }
         }
     }
 
@@ -92,6 +100,13 @@ mavenPublishing {
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
 
     signAllPublications()
+}
+
+swiftklib {
+    create("StoreKitManager") {
+        path = file("src/nativeInterop/cinterop")
+        packageName("com.multiplatform.storekit")
+    }
 }
 
 task("testClasses") {}
