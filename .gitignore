@@ -1,5 +1,30 @@
-gradle.properties
 .gradle
-build
-.idea
+# Gradle
+.gradle/
+**/build/
 local.properties
+
+# IDE
+.idea/
+*.iml
+.kotlin/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets & Credentials
+gradle.properties
+*.env
+
+# Build Artifacts
+*.aar
+*.jar
+!gradle/wrapper/*.jar
+
+# CocoaPods (iOS)
+**/ios/Pods/
+**/ios/Podfile.lock
+
+# Logs
+*.log
