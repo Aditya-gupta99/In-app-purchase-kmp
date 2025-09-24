@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "io.github.aditya-gupta99"
-version = "1.0.11"
+version = "1.0.12"
 
 kotlin {
     androidTarget {
