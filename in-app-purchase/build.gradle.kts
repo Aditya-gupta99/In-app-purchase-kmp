@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "io.github.aditya-gupta99"
-version = "1.0.7"
+version = "1.0.11"
 
 kotlin {
     androidTarget {
@@ -108,5 +108,3 @@ swiftklib {
         packageName("com.multiplatform.storekit")
     }
 }
-
-task("testClasses") {}
