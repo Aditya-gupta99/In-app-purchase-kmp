@@ -25,6 +25,21 @@ Add the following dependency to your
 
 ## Setup
 
+### Dependency Injection Configuration
+
+Create `IAPManager` object to inject into activity. 
+
+**Common Payment Module:**
+```kotlin
+val PaymentModule = module {
+
+    singleOf(::IAPManager)
+
+    singleOf(::InAppPurchaseProvider)
+
+}
+```
+
 ### Android Setup
 
 For Android, you need to provide both context and activity to the `IAPManager`. Set this up in your main activity:
@@ -39,50 +54,6 @@ class MainActivity : ComponentActivity() {
         setContent {
             MainApp()
         }
-    }
-}
-```
-
-
-### Dependency Injection Configuration
-
-Create platform-specific modules using the expect/actual pattern:
-
-**Common Module:**
-```kotlin
-expect val CreatePaymentInstance: Module
-```
-
-**iOS Module:**
-```kotlin
-actual val CreatePaymentInstance: Module = module {
-    single {
-        IAPManager()
-    }
-}
-```
-
-**Android Module:**
-```kotlin
-actual val CreatePaymentInstance: Module = module {
-    single {
-        IAPManager().apply {
-            setContext(androidContext())
-        }
-    }
-}
-```
-
-
-**Common Payment Module:**
-```kotlin
-val PaymentModule = module {
-    includes(CreatePaymentInstance)
-    
-    single {
-        InAppPurchaseProvider(
-            inAppPurchaseManager = get()
-        )
     }
 }
 ```
