@@ -1,4 +1,4 @@
-![](https://i.ibb.co/8S6SnSK/Group-1.png)
+![](https://miro.medium.com/v2/resize:fit:1400/format:webp/1*w4ntdpQp1wBYpXSGUwO3Fw.png)
 # In App Purchase Kmp Library
 
 A Kotlin Multiplatform library that provides unified in-app purchase functionality for Android and iOS platforms. This library abstracts Google Play Billing (Android) and StoreKit 2 (iOS) into a single, easy-to-use API.
