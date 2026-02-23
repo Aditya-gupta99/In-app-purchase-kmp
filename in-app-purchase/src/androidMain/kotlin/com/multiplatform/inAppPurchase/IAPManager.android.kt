@@ -15,7 +15,9 @@ import com.android.billingclient.api.QueryProductDetailsParams
 import com.android.billingclient.api.QueryPurchasesParams
 import com.multiplatform.inAppPurchase.model.IAPResult
 import com.multiplatform.inAppPurchase.model.Product
+import com.multiplatform.inAppPurchase.model.ProductType
 import com.multiplatform.inAppPurchase.model.Purchase
+import com.multiplatform.inAppPurchase.model.SubscriptionOffer
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -87,54 +89,108 @@ actual class IAPManager actual constructor() {
     /**
      * Query product details (one-time products / subscriptions)
      */
-    actual suspend fun getProducts(productIds: List<String>): IAPResult<List<Product>> =
-        suspendCancellableCoroutine { continuation ->
+    actual suspend fun getProducts(
+        productIds: List<String>,
+        productType: ProductType
+    ): IAPResult<List<Product>> = suspendCancellableCoroutine { continuation ->
 
-            val client = billingClient ?: run {
-                continuation.resume(IAPResult.Error("Billing client not initialized"))
-                return@suspendCancellableCoroutine
-            }
+        val client = billingClient ?: run {
+            continuation.resume(IAPResult.Error("Billing client not initialized"))
+            return@suspendCancellableCoroutine
+        }
 
-            val productList = productIds.map { productId ->
-                QueryProductDetailsParams.Product.newBuilder()
-                    .setProductId(productId)
-                    // When building product list, choose ProductType.ONE_TIME_PRODUCT for v8 semantics or INAPP constant
-                    .setProductType(BillingClient.ProductType.INAPP)
-                    .build()
-            }
+        val billingProductType = productType.toBillingProductType()
 
-            val params = QueryProductDetailsParams.newBuilder()
-                .setProductList(productList)
+        val productList = productIds.map { productId ->
+            QueryProductDetailsParams.Product.newBuilder()
+                .setProductId(productId)
+                .setProductType(billingProductType)
                 .build()
+        }
 
-            client.queryProductDetailsAsync(params) { billingResult, productDetailsResponse ->
-                if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-                    val mapped = productDetailsResponse.productDetailsList.map {
-                        // cache for later purchase
-                        productDetailsCache[it.productId] = it
-                        Product(
-                            id = it.productId,
-                            title = it.title,
-                            description = it.description,
-                            price = it.oneTimePurchaseOfferDetails?.formattedPrice ?: "",
-                            priceCurrencyCode = it.oneTimePurchaseOfferDetails?.priceCurrencyCode
-                                ?: "",
-                            priceAmountMicros = it.oneTimePurchaseOfferDetails?.priceAmountMicros
-                                ?: 0,
-                            type = it.productType
-                        )
+        val params = QueryProductDetailsParams.newBuilder()
+            .setProductList(productList)
+            .build()
+
+        client.queryProductDetailsAsync(params) { billingResult, productDetailsResponse ->
+            if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+                val mapped = productDetailsResponse.productDetailsList.map { details ->
+                    productDetailsCache[details.productId] = details
+
+                    val isSubscription = details.productType == BillingClient.ProductType.SUBS
+
+                    // Map subscription offers
+                    val subscriptionOffers = if (isSubscription) {
+                        details.subscriptionOfferDetails?.map { offer ->
+                            val pricingPhase = offer.pricingPhases.pricingPhaseList.lastOrNull()
+                            SubscriptionOffer(
+                                basePlanId = offer.basePlanId,
+                                offerToken = offer.offerToken,
+                                price = pricingPhase?.formattedPrice ?: "",
+                                priceCurrencyCode = pricingPhase?.priceCurrencyCode ?: "",
+                                priceAmountMicros = pricingPhase?.priceAmountMicros ?: 0L,
+                                billingPeriod = pricingPhase?.billingPeriod ?: ""
+                            )
+                        } ?: emptyList()
+                    } else emptyList()
+
+                    // For one-time products use oneTimePurchaseOfferDetails, for subs use first offer
+                    val displayPrice = if (isSubscription) {
+                        details.subscriptionOfferDetails
+                            ?.firstOrNull()
+                            ?.pricingPhases
+                            ?.pricingPhaseList
+                            ?.lastOrNull()
+                            ?.formattedPrice ?: ""
+                    } else {
+                        details.oneTimePurchaseOfferDetails?.formattedPrice ?: ""
                     }
-                    continuation.resume(IAPResult.Success(mapped))
-                } else {
-                    continuation.resume(
-                        IAPResult.Error(
-                            "Failed to query products: ${billingResult.debugMessage}",
-                            billingResult.responseCode
-                        )
+
+                    val displayCurrency = if (isSubscription) {
+                        details.subscriptionOfferDetails
+                            ?.firstOrNull()
+                            ?.pricingPhases
+                            ?.pricingPhaseList
+                            ?.lastOrNull()
+                            ?.priceCurrencyCode ?: ""
+                    } else {
+                        details.oneTimePurchaseOfferDetails?.priceCurrencyCode ?: ""
+                    }
+
+                    val displayMicros = if (isSubscription) {
+                        details.subscriptionOfferDetails
+                            ?.firstOrNull()
+                            ?.pricingPhases
+                            ?.pricingPhaseList
+                            ?.lastOrNull()
+                            ?.priceAmountMicros ?: 0L
+                    } else {
+                        details.oneTimePurchaseOfferDetails?.priceAmountMicros ?: 0L
+                    }
+
+                    Product(
+                        id = details.productId,
+                        title = details.title,
+                        description = details.description,
+                        price = displayPrice,
+                        priceCurrencyCode = displayCurrency,
+                        priceAmountMicros = displayMicros,
+                        type = details.productType,
+                        productType = productType,
+                        subscriptionOffers = subscriptionOffers
                     )
                 }
+                continuation.resume(IAPResult.Success(mapped))
+            } else {
+                continuation.resume(
+                    IAPResult.Error(
+                        "Failed to query products: ${billingResult.debugMessage}",
+                        billingResult.responseCode
+                    )
+                )
             }
         }
+    }
 
     /**
      * Launch purchase flow for a product.
@@ -144,7 +200,8 @@ actual class IAPManager actual constructor() {
      * You should call this from UI (Activity) scope because it needs an Activity.
      */
     actual suspend fun launchPurchaseFlow(
-        product: Product
+        product: Product,
+        basePlanId: String?
     ): IAPResult<Unit> = suspendCancellableCoroutine { continuation ->
 
         val client = billingClient ?: run {
@@ -155,24 +212,41 @@ actual class IAPManager actual constructor() {
             continuation.resume(IAPResult.Error("Activity not set"))
             return@suspendCancellableCoroutine
         }
-
-        val productDetails = productDetailsCache[product.id]
-        if (productDetails == null) {
+        val productDetails = productDetailsCache[product.id] ?: run {
             continuation.resume(IAPResult.Error("ProductDetails not found for ${product.id}"))
             return@suspendCancellableCoroutine
         }
 
-
-        val productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
+        val productParamsBuilder = BillingFlowParams.ProductDetailsParams.newBuilder()
             .setProductDetails(productDetails)
 
-        // If an offer token is required, set it:
-        productDetails.oneTimePurchaseOfferDetails?.offerToken?.let {
-            if (it.isNotEmpty()) productParams.setOfferToken(it)
+        when (product.productType) {
+            ProductType.SUBSCRIPTION -> {
+                // Find the right offer by basePlanId, or fall back to first available
+                val selectedOffer = if (basePlanId != null) {
+                    productDetails.subscriptionOfferDetails?.find { it.basePlanId == basePlanId }
+                } else {
+                    productDetails.subscriptionOfferDetails?.firstOrNull()
+                }
+
+                if (selectedOffer == null) {
+                    continuation.resume(IAPResult.Error("No subscription offer found for basePlanId: $basePlanId"))
+                    return@suspendCancellableCoroutine
+                }
+
+                productParamsBuilder.setOfferToken(selectedOffer.offerToken)
+            }
+
+            ProductType.ONE_TIME_PURCHASE -> {
+                // offerToken is optional for INAPP, set if present
+                productDetails.oneTimePurchaseOfferDetails?.offerToken?.let {
+                    if (it.isNotEmpty()) productParamsBuilder.setOfferToken(it)
+                }
+            }
         }
 
         val billingFlowParams = BillingFlowParams.newBuilder()
-            .setProductDetailsParamsList(listOf(productParams.build()))
+            .setProductDetailsParamsList(listOf(productParamsBuilder.build()))
             .build()
 
         val result = client.launchBillingFlow(act, billingFlowParams)
@@ -253,41 +327,44 @@ actual class IAPManager actual constructor() {
     /**
      * Query current owned purchases.
      */
-    actual suspend fun getPurchases(): IAPResult<List<Purchase>> =
-        suspendCancellableCoroutine { continuation ->
-            val client = billingClient ?: run {
-                continuation.resume(IAPResult.Error("Billing client not initialized"))
-                return@suspendCancellableCoroutine
-            }
+    actual suspend fun getPurchases(
+        productType: ProductType
+    ): IAPResult<List<Purchase>> = suspendCancellableCoroutine { continuation ->
+        val client = billingClient ?: run {
+            continuation.resume(IAPResult.Error("Billing client not initialized"))
+            return@suspendCancellableCoroutine
+        }
 
-            val params = QueryPurchasesParams.newBuilder()
-                .setProductType(BillingClient.ProductType.INAPP)
-                .build()
+        val params = QueryPurchasesParams.newBuilder()
+            .setProductType(productType.toBillingProductType())
+            .build()
 
-            client.queryPurchasesAsync(params) { billingResult, purchasesResult ->
-                if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-                    val purchases = purchasesResult.map { p ->
-                        Purchase(
-                            productId = p.products.firstOrNull() ?: "",
-                            purchaseToken = p.purchaseToken,
-                            orderId = p.orderId ?: "",
-                            purchaseTime = p.purchaseTime,
-                            isAcknowledged = p.isAcknowledged,
-                            originalJson = p.originalJson,
-                            signature = p.signature
-                        )
-                    }
-                    continuation.resume(IAPResult.Success(purchases))
-                } else {
-                    continuation.resume(
-                        IAPResult.Error(
-                            "Failed to query purchases: ${billingResult.debugMessage}",
-                            billingResult.responseCode
-                        )
+        client.queryPurchasesAsync(params) { billingResult, purchasesResult ->
+            if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
+                val purchases = purchasesResult.map { p ->
+                    Purchase(
+                        productId = p.products.firstOrNull() ?: "",
+                        purchaseToken = p.purchaseToken,
+                        orderId = p.orderId ?: "",
+                        purchaseTime = p.purchaseTime,
+                        isAcknowledged = p.isAcknowledged,
+                        originalJson = p.originalJson,
+                        signature = p.signature,
+                        productType = productType,
+                        isAutoRenewing = p.isAutoRenewing
                     )
                 }
+                continuation.resume(IAPResult.Success(purchases))
+            } else {
+                continuation.resume(
+                    IAPResult.Error(
+                        "Failed to query purchases: ${billingResult.debugMessage}",
+                        billingResult.responseCode
+                    )
+                )
             }
         }
+    }
 
     /**
      * Restore == query purchases for Android
@@ -342,4 +419,9 @@ actual class IAPManager actual constructor() {
             signature = this.signature
         )
     }
+}
+
+private fun ProductType.toBillingProductType(): String = when (this) {
+    ProductType.ONE_TIME_PURCHASE -> BillingClient.ProductType.INAPP
+    ProductType.SUBSCRIPTION -> BillingClient.ProductType.SUBS
 }

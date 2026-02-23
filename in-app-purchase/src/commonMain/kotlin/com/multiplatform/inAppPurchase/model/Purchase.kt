@@ -14,5 +14,9 @@ data class Purchase(
 
     val originalJson : String,
 
-    val signature : String
+    val signature : String,
+
+    val productType: ProductType = ProductType.ONE_TIME_PURCHASE,
+
+    val isAutoRenewing: Boolean = false
 )

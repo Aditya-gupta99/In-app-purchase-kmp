@@ -4,6 +4,7 @@ package com.multiplatform.inAppPurchase
 
 import com.multiplatform.inAppPurchase.model.IAPResult
 import com.multiplatform.inAppPurchase.model.Product
+import com.multiplatform.inAppPurchase.model.ProductType
 import com.multiplatform.inAppPurchase.model.Purchase
 import com.multiplatform.storekit.StoreKitManagerWrapper
 import com.multiplatform.storekit.StoreKitProduct
@@ -46,104 +47,109 @@ actual class IAPManager actual constructor() {
     /**
      * Query product details from App Store using StoreKit 2
      */
-    actual suspend fun getProducts(productIds: List<String>): IAPResult<List<Product>> =
-        suspendCancellableCoroutine { continuation ->
-            println("🛒 [IAP] Starting product query for IDs: $productIds")
+    actual suspend fun getProducts(
+        productIds: List<String>,
+        productType: ProductType
+    ): IAPResult<List<Product>> = suspendCancellableCoroutine { continuation ->
 
-            if (!isInitialized) {
-                println("❌ [IAP] Cannot query products - StoreKit 2 not initialized")
-                continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
-                return@suspendCancellableCoroutine
-            }
+        println("🛒 [IAP] Starting product query for IDs: $productIds")
 
-            storeKitWrapper?.getProductsWithProductIds(productIds) { result ->
-                if (result?.success() == true) {
-                    try {
-                        val products = mutableListOf<Product>()
+        if (!isInitialized) {
+            println("❌ [IAP] Cannot query products - StoreKit 2 not initialized")
+            continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
+            return@suspendCancellableCoroutine
+        }
 
-                        result.data()?.let { data ->
-                            val count = data.count()
-                            println("📦 [IAP] Found $count products")
+        storeKitWrapper?.getProductsWithProductIds(productIds) { result ->
+            if (result?.success() == true) {
+                try {
+                    val products = mutableListOf<Product>()
 
-                            for (i in 0 until count) {
-                                val item = data[i]
+                    result.data()?.let { data ->
+                        val count = data.count()
+                        println("📦 [IAP] Found $count products")
+
+                        for (i in 0 until count) {
+                            val item = data[i]
 //                                val item = data.objectAtIndex(i.toULong())
-                                if (item is StoreKitProduct) {
-                                    val product = Product(
-                                        id = item.id(),
-                                        title = item.displayName(),
-                                        description = item.productDescription(),
-                                        price = item.price(),
-                                        priceCurrencyCode = item.currencyCode(),
-                                        priceAmountMicros = item.priceAmountMicros(),
-                                        type = item.type()
-                                    )
-                                    products.add(product)
-                                    println("✅ [IAP] Added product: ${item.id()}")
-                                }
+                            if (item is StoreKitProduct) {
+                                val product = Product(
+                                    id = item.id(),
+                                    title = item.displayName(),
+                                    description = item.productDescription(),
+                                    price = item.price(),
+                                    priceCurrencyCode = item.currencyCode(),
+                                    priceAmountMicros = item.priceAmountMicros(),
+                                    type = item.type()
+                                )
+                                products.add(product)
+                                println("✅ [IAP] Added product: ${item.id()}")
                             }
                         }
-
-                        println("🎉 [IAP] Product query completed - returning ${products.size} products")
-                        continuation.resume(IAPResult.Success(products))
-                    } catch (e: Exception) {
-                        println("❌ [IAP] Error parsing products: ${e.message}")
-                        continuation.resume(IAPResult.Error("Failed to parse products: ${e.message}"))
                     }
-                } else {
-                    val errorMessage = result?.errorMessage() ?: "Unknown error"
-                    println("❌ [IAP] Product query failed: $errorMessage")
-                    continuation.resume(IAPResult.Error(errorMessage, result?.errorCode()))
+
+                    println("🎉 [IAP] Product query completed - returning ${products.size} products")
+                    continuation.resume(IAPResult.Success(products))
+                } catch (e: Exception) {
+                    println("❌ [IAP] Error parsing products: ${e.message}")
+                    continuation.resume(IAPResult.Error("Failed to parse products: ${e.message}"))
                 }
-            } ?: run {
-                continuation.resume(IAPResult.Error("StoreKitManagerWrapper not initialized"))
+            } else {
+                val errorMessage = result?.errorMessage() ?: "Unknown error"
+                println("❌ [IAP] Product query failed: $errorMessage")
+                continuation.resume(IAPResult.Error(errorMessage, result?.errorCode()))
             }
+        } ?: run {
+            continuation.resume(IAPResult.Error("StoreKitManagerWrapper not initialized"))
         }
+    }
 
     /**
      * Launch purchase flow for a product using StoreKit 2
      */
-    actual suspend fun launchPurchaseFlow(product: Product): IAPResult<Unit> =
-        suspendCancellableCoroutine { continuation ->
-            println("💳 [IAP] Starting purchase flow for product: ${product.id}")
+    actual suspend fun launchPurchaseFlow(
+        product: Product,
+        basePlanId: String?
+    ): IAPResult<Unit> = suspendCancellableCoroutine { continuation ->
 
-            if (!isInitialized) {
-                println("❌ [IAP] Cannot launch purchase - StoreKit 2 not initialized")
-                continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
-                return@suspendCancellableCoroutine
-            }
+        println("💳 [IAP] Starting purchase flow for product: ${product.id}")
 
-            storeKitWrapper?.launchPurchaseFlowWithProductId(product.id) { result ->
-                if (result?.success() == true) {
-                    println("✅ [IAP] Purchase flow completed successfully")
-                    continuation.resume(IAPResult.Success(Unit))
-                } else {
-                    val errorMessage = result?.errorMessage() ?: "Unknown error"
-                    println("❌ [IAP] Purchase flow failed: $errorMessage")
-
-                    val errorCode = result?.errorCode()
-                    when (errorCode) {
-                        2 -> continuation.resume(
-                            IAPResult.Error(
-                                "Purchase cancelled by user",
-                                errorCode
-                            )
-                        )
-
-                        3 -> continuation.resume(
-                            IAPResult.Error(
-                                "Purchase is pending approval",
-                                errorCode
-                            )
-                        )
-
-                        else -> continuation.resume(IAPResult.Error(errorMessage, errorCode))
-                    }
-                }
-            } ?: run {
-                continuation.resume(IAPResult.Error("StoreKitManagerWrapper not initialized"))
-            }
+        if (!isInitialized) {
+            println("❌ [IAP] Cannot launch purchase - StoreKit 2 not initialized")
+            continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
+            return@suspendCancellableCoroutine
         }
+
+        storeKitWrapper?.launchPurchaseFlowWithProductId(product.id) { result ->
+            if (result?.success() == true) {
+                println("✅ [IAP] Purchase flow completed successfully")
+                continuation.resume(IAPResult.Success(Unit))
+            } else {
+                val errorMessage = result?.errorMessage() ?: "Unknown error"
+                println("❌ [IAP] Purchase flow failed: $errorMessage")
+
+                when (val errorCode = result?.errorCode()) {
+                    2 -> continuation.resume(
+                        IAPResult.Error(
+                            "Purchase cancelled by user",
+                            errorCode
+                        )
+                    )
+
+                    3 -> continuation.resume(
+                        IAPResult.Error(
+                            "Purchase is pending approval",
+                            errorCode
+                        )
+                    )
+
+                    else -> continuation.resume(IAPResult.Error(errorMessage, errorCode))
+                }
+            }
+        } ?: run {
+            continuation.resume(IAPResult.Error("StoreKitManagerWrapper not initialized"))
+        }
+    }
 
     /**
      * Consume a purchase (automatic in StoreKit 2)
@@ -190,58 +196,60 @@ actual class IAPManager actual constructor() {
     /**
      * Get current purchases using StoreKit 2
      */
-    actual suspend fun getPurchases(): IAPResult<List<Purchase>> =
-        suspendCancellableCoroutine { continuation ->
-            println("📋 [IAP] Getting current purchases")
+    actual suspend fun getPurchases(
+        productType: ProductType
+    ): IAPResult<List<Purchase>> = suspendCancellableCoroutine { continuation ->
 
-            if (!isInitialized) {
-                continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
-                return@suspendCancellableCoroutine
-            }
+        println("📋 [IAP] Getting current purchases")
 
-            storeKitWrapper?.getPurchasesWithCompletion { result ->
-                if (result?.success() == true) {
-                    try {
-                        val purchases = mutableListOf<Purchase>()
+        if (!isInitialized) {
+            continuation.resume(IAPResult.Error("StoreKit 2 not initialized"))
+            return@suspendCancellableCoroutine
+        }
 
-                        result.data()?.let { data ->
-                            val count = data.count()
-                            println("📦 [IAP] Found $count purchases")
+        storeKitWrapper?.getPurchasesWithCompletion { result ->
+            if (result?.success() == true) {
+                try {
+                    val purchases = mutableListOf<Purchase>()
 
-                            for (i in 0 until count) {
-                                val item = data[i]
+                    result.data()?.let { data ->
+                        val count = data.count()
+                        println("📦 [IAP] Found $count purchases")
+
+                        for (i in 0 until count) {
+                            val item = data[i]
 //                                val item = data.objectAtIndex(i.toULong())
-                                if (item is StoreKitPurchase) {
-                                    val purchase = Purchase(
-                                        productId = item.productId(),
-                                        purchaseToken = item.purchaseToken(),
-                                        orderId = item.orderId(),
-                                        purchaseTime = item.purchaseTime(),
-                                        isAcknowledged = item.isAcknowledged(),
-                                        originalJson = item.originalJson(),
-                                        signature = item.signature()
-                                    )
-                                    purchases.add(purchase)
-                                    println("✅ [IAP] Added purchase: ${item.productId()}")
-                                }
+                            if (item is StoreKitPurchase) {
+                                val purchase = Purchase(
+                                    productId = item.productId(),
+                                    purchaseToken = item.purchaseToken(),
+                                    orderId = item.orderId(),
+                                    purchaseTime = item.purchaseTime(),
+                                    isAcknowledged = item.isAcknowledged(),
+                                    originalJson = item.originalJson(),
+                                    signature = item.signature()
+                                )
+                                purchases.add(purchase)
+                                println("✅ [IAP] Added purchase: ${item.productId()}")
                             }
                         }
-
-                        println("🎉 [IAP] Get purchases completed - returning ${purchases.size} purchases")
-                        continuation.resume(IAPResult.Success(purchases))
-                    } catch (e: Exception) {
-                        println("❌ [IAP] Error parsing purchases: ${e.message}")
-                        continuation.resume(IAPResult.Error("Failed to parse purchases: ${e.message}"))
                     }
-                } else {
-                    val errorMessage = result?.errorMessage() ?: "Unknown error"
-                    println("❌ [IAP] Get purchases failed: $errorMessage")
-                    continuation.resume(IAPResult.Error(errorMessage, result?.errorCode()))
+
+                    println("🎉 [IAP] Get purchases completed - returning ${purchases.size} purchases")
+                    continuation.resume(IAPResult.Success(purchases))
+                } catch (e: Exception) {
+                    println("❌ [IAP] Error parsing purchases: ${e.message}")
+                    continuation.resume(IAPResult.Error("Failed to parse purchases: ${e.message}"))
                 }
-            } ?: run {
-                continuation.resume(IAPResult.Error("StoreKitManagerWrapper not initialized"))
+            } else {
+                val errorMessage = result?.errorMessage() ?: "Unknown error"
+                println("❌ [IAP] Get purchases failed: $errorMessage")
+                continuation.resume(IAPResult.Error(errorMessage, result?.errorCode()))
             }
+        } ?: run {
+            continuation.resume(IAPResult.Error("StoreKitManagerWrapper not initialized"))
         }
+    }
 
     /**
      * Restore purchases using StoreKit 2

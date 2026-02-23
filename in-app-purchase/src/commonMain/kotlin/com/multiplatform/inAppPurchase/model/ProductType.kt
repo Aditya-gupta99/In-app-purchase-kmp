@@ -1,7 +1,6 @@
 package com.multiplatform.inAppPurchase.model
 
 enum class ProductType {
-    CONSUMABLE,
-    NON_CONSUMABLE,
+    ONE_TIME_PURCHASE,
     SUBSCRIPTION
 }

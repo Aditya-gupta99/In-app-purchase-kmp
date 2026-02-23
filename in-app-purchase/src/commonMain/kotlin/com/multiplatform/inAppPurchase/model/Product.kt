@@ -14,5 +14,9 @@ data class Product(
 
     val priceAmountMicros: Long,
 
-    val type: String
+    val type: String,
+
+    val productType: ProductType = ProductType.ONE_TIME_PURCHASE,
+
+    val subscriptionOffers: List<SubscriptionOffer> = emptyList()
 )
