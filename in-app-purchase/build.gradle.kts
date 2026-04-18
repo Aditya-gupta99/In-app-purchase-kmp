@@ -10,7 +10,7 @@ plugins {
 }
 
 group = "io.github.aditya-gupta99"
-version = "1.0.13"
+version = "1.0.41"
 
 kotlin {
     androidTarget {
@@ -71,6 +71,11 @@ android {
 
 mavenPublishing {
 
+    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL, automaticRelease = true)
+
+    // ✅ Sign all publications (required by Maven Central)
+    signAllPublications()
+
     coordinates(group.toString(), "inAppPurchase-kmp", version.toString())
 
     pom {
@@ -94,12 +99,14 @@ mavenPublishing {
         }
         scm {
             url = "https://github.com/Aditya-gupta99/In-app-purchase-kmp"
+            connection = "scm:git:git://github.com/Aditya-gupta99/In-app-purchase-kmp.git"          // ✅ add
+            developerConnection = "scm:git:ssh://github.com/Aditya-gupta99/In-app-purchase-kmp.git" // ✅ add
         }
     }
 
-    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
+//    publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
 
-    signAllPublications()
+//    signAllPublications()
 }
 
 swiftklib {

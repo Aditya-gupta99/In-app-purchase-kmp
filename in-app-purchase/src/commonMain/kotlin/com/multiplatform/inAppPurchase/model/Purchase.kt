@@ -18,5 +18,11 @@ data class Purchase(
 
     val productType: ProductType = ProductType.ONE_TIME_PURCHASE,
 
-    val isAutoRenewing: Boolean = false
+    val isAutoRenewing: Boolean = false,
+
+    val jwsRepresentation: String = "",
+
+    val originalTransactionId: String = "",
+
+    val transactionId : String = ""
 )

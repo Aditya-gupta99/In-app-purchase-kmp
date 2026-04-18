@@ -18,6 +18,7 @@ import com.multiplatform.inAppPurchase.model.Product
 import com.multiplatform.inAppPurchase.model.ProductType
 import com.multiplatform.inAppPurchase.model.Purchase
 import com.multiplatform.inAppPurchase.model.SubscriptionOffer
+import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -39,14 +40,44 @@ actual class IAPManager actual constructor() {
         this.activity = activity
     }
 
+    private var purchaseFlowContinuation: CancellableContinuation<IAPResult<Unit>>? = null
+    private var currentPurchaseId = 0
+
+    /**
+     * Lock object to synchronize access to [purchaseFlowContinuation].
+     * This prevents race conditions when multiple BillingClient callbacks
+     * fire simultaneously on different threads.
+     */
+    private val continuationLock = Any()
+
     private val purchasesUpdatedListener = PurchasesUpdatedListener { billingResult, purchases ->
-        if (billingResult.responseCode == BillingClient.BillingResponseCode.OK) {
-            purchases?.forEach { p ->
-                // Forward to a callback if set (used by the callbackFlow)
-                purchasesUpdatedCallback?.invoke(p)
+        val continuation: CancellableContinuation<IAPResult<Unit>>
+
+        // Atomically read-and-clear the continuation so only ONE thread can consume it
+        synchronized(continuationLock) {
+            val c = purchaseFlowContinuation ?: return@PurchasesUpdatedListener
+            purchaseFlowContinuation = null
+            continuation = c
+        }
+
+        when (billingResult.responseCode) {
+            BillingClient.BillingResponseCode.OK -> {
+                purchases?.forEach { p -> purchasesUpdatedCallback?.invoke(p) }
+                continuation.resume(IAPResult.Success(Unit))
             }
-        } else {
-            // You can also expose errors via flows/callbacks if you want
+            BillingClient.BillingResponseCode.USER_CANCELED -> {
+                continuation.resume(
+                    IAPResult.Error("User cancelled the purchase", billingResult.responseCode)
+                )
+            }
+            else -> {
+                continuation.resume(
+                    IAPResult.Error(
+                        "Purchase failed: ${billingResult.debugMessage}",
+                        billingResult.responseCode
+                    )
+                )
+            }
         }
     }
 
@@ -58,6 +89,14 @@ actual class IAPManager actual constructor() {
             continuation.resume(IAPResult.Error("Context not set"))
             return@suspendCancellableCoroutine
         }
+
+        // ── FIX: disconnect any previously-created BillingClient ──
+        // Google Play dispatches PurchasesUpdatedListener to EVERY connected
+        // BillingClient in the process. Leaving old clients alive causes the
+        // listener to fire N times (once per client), which produces the
+        // duplicate "User cancelled the purchase" errors the caller observes.
+        billingClient?.endConnection()
+        billingClient = null
 
         billingClient = BillingClient.newBuilder(context)
             .setListener(purchasesUpdatedListener)
@@ -201,20 +240,39 @@ actual class IAPManager actual constructor() {
      */
     actual suspend fun launchPurchaseFlow(
         product: Product,
-        basePlanId: String?
+        basePlanId: String?,
+        userId: String?
     ): IAPResult<Unit> = suspendCancellableCoroutine { continuation ->
 
         val client = billingClient ?: run {
             continuation.resume(IAPResult.Error("Billing client not initialized"))
             return@suspendCancellableCoroutine
         }
+
         val act = activity ?: run {
             continuation.resume(IAPResult.Error("Activity not set"))
             return@suspendCancellableCoroutine
         }
+
         val productDetails = productDetailsCache[product.id] ?: run {
             continuation.resume(IAPResult.Error("ProductDetails not found for ${product.id}"))
             return@suspendCancellableCoroutine
+        }
+
+        val thisPurchaseId = ++currentPurchaseId
+
+        // Store the continuation so PurchasesUpdatedListener can resume it
+        synchronized(continuationLock) {
+            purchaseFlowContinuation = continuation
+        }
+
+        // If the coroutine is cancelled externally, clear the stored continuation
+        continuation.invokeOnCancellation {
+            synchronized(continuationLock) {
+                if (currentPurchaseId == thisPurchaseId) {
+                    purchaseFlowContinuation = null
+                }
+            }
         }
 
         val productParamsBuilder = BillingFlowParams.ProductDetailsParams.newBuilder()
@@ -222,7 +280,6 @@ actual class IAPManager actual constructor() {
 
         when (product.productType) {
             ProductType.SUBSCRIPTION -> {
-                // Find the right offer by basePlanId, or fall back to first available
                 val selectedOffer = if (basePlanId != null) {
                     productDetails.subscriptionOfferDetails?.find { it.basePlanId == basePlanId }
                 } else {
@@ -230,6 +287,7 @@ actual class IAPManager actual constructor() {
                 }
 
                 if (selectedOffer == null) {
+                    synchronized(continuationLock) { purchaseFlowContinuation = null }
                     continuation.resume(IAPResult.Error("No subscription offer found for basePlanId: $basePlanId"))
                     return@suspendCancellableCoroutine
                 }
@@ -238,7 +296,6 @@ actual class IAPManager actual constructor() {
             }
 
             ProductType.ONE_TIME_PURCHASE -> {
-                // offerToken is optional for INAPP, set if present
                 productDetails.oneTimePurchaseOfferDetails?.offerToken?.let {
                     if (it.isNotEmpty()) productParamsBuilder.setOfferToken(it)
                 }
@@ -247,13 +304,15 @@ actual class IAPManager actual constructor() {
 
         val billingFlowParams = BillingFlowParams.newBuilder()
             .setProductDetailsParamsList(listOf(productParamsBuilder.build()))
+            .setObfuscatedAccountId(userId ?: "")
             .build()
 
+        // This only launches the billing sheet — does NOT mean purchase succeeded
         val result = client.launchBillingFlow(act, billingFlowParams)
 
-        if (result.responseCode == BillingClient.BillingResponseCode.OK) {
-            continuation.resume(IAPResult.Success(Unit))
-        } else {
+        if (result.responseCode != BillingClient.BillingResponseCode.OK) {
+            // Sheet failed to open — resume immediately with error
+            synchronized(continuationLock) { purchaseFlowContinuation = null }
             continuation.resume(
                 IAPResult.Error(
                     "Failed to launch billing flow: ${result.debugMessage}",
@@ -261,6 +320,9 @@ actual class IAPManager actual constructor() {
                 )
             )
         }
+
+        // If sheet opened successfully (OK), we do NOT resume here.
+        // The coroutine stays suspended until PurchasesUpdatedListener fires.
     }
 
     /**

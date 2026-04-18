@@ -109,7 +109,8 @@ actual class IAPManager actual constructor() {
      */
     actual suspend fun launchPurchaseFlow(
         product: Product,
-        basePlanId: String?
+        basePlanId: String?,
+        userId: String?
     ): IAPResult<Unit> = suspendCancellableCoroutine { continuation ->
 
         println("💳 [IAP] Starting purchase flow for product: ${product.id}")
@@ -120,7 +121,7 @@ actual class IAPManager actual constructor() {
             return@suspendCancellableCoroutine
         }
 
-        storeKitWrapper?.launchPurchaseFlowWithProductId(product.id) { result ->
+        storeKitWrapper?.launchPurchaseFlowWithProductId(product.id, userId) { result ->
             if (result?.success() == true) {
                 println("✅ [IAP] Purchase flow completed successfully")
                 continuation.resume(IAPResult.Success(Unit))
@@ -227,7 +228,10 @@ actual class IAPManager actual constructor() {
                                     purchaseTime = item.purchaseTime(),
                                     isAcknowledged = item.isAcknowledged(),
                                     originalJson = item.originalJson(),
-                                    signature = item.signature()
+                                    signature = item.signature(),
+                                    jwsRepresentation = item.jwsRepresentation(),
+                                    originalTransactionId = item.originalTransactionId(),
+                                    transactionId = item.transactionId()
                                 )
                                 purchases.add(purchase)
                                 println("✅ [IAP] Added purchase: ${item.productId()}")
@@ -283,7 +287,10 @@ actual class IAPManager actual constructor() {
                                         purchaseTime = item.purchaseTime(),
                                         isAcknowledged = item.isAcknowledged(),
                                         originalJson = item.originalJson(),
-                                        signature = item.signature()
+                                        signature = item.signature(),
+                                        jwsRepresentation = item.jwsRepresentation(),
+                                        originalTransactionId = item.originalTransactionId(),
+                                        transactionId = item.transactionId()
                                     )
                                     purchases.add(purchase)
                                     println("✅ [IAP] Restored purchase: ${item.productId()}")
@@ -324,7 +331,10 @@ actual class IAPManager actual constructor() {
                     purchaseTime = purchase?.purchaseTime() ?: 0L,
                     isAcknowledged = purchase?.isAcknowledged() ?: false,
                     originalJson = purchase?.originalJson() ?: "",
-                    signature = purchase?.signature() ?: ""
+                    signature = purchase?.signature() ?: "",
+                    jwsRepresentation = purchase?.jwsRepresentation() ?: "",
+                    originalTransactionId = purchase?.originalTransactionId() ?: "",
+                    transactionId = purchase?.transactionId() ?: ""
                 )
 
                 println("✅ [IAP] Created Purchase object:")

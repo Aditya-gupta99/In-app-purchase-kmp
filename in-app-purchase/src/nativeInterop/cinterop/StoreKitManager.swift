@@ -1,7 +1,8 @@
-import StoreKit
 import Foundation
+import StoreKit
 
 // MARK: - @objc compatible model classes
+
 @objc public class StoreKitProduct: NSObject {
     @objc public let id: String
     @objc public let displayName: String
@@ -31,8 +32,11 @@ import Foundation
     @objc public let isAcknowledged: Bool
     @objc public let originalJson: String
     @objc public let signature: String
+    @objc public let transactionId: String
+    @objc public let jwsRepresentation: String
+    @objc public let originalTransactionId: String
 
-    public init(productId: String, purchaseToken: String, orderId: String, purchaseTime: Int64, isAcknowledged: Bool, originalJson: String, signature: String) {
+    public init(productId: String, purchaseToken: String, orderId: String, purchaseTime: Int64, isAcknowledged: Bool, originalJson: String, signature: String, transactionId: String, jwsRepresentation: String, originalTransactionId: String) {
         self.productId = productId
         self.purchaseToken = purchaseToken
         self.orderId = orderId
@@ -40,6 +44,9 @@ import Foundation
         self.isAcknowledged = isAcknowledged
         self.originalJson = originalJson
         self.signature = signature
+        self.transactionId = transactionId
+        self.jwsRepresentation = jwsRepresentation
+        self.originalTransactionId = originalTransactionId
         super.init()
     }
 }
@@ -49,33 +56,42 @@ import Foundation
     @objc public let errorMessage: String?
     @objc public let errorCode: Int32
     @objc public let data: NSArray?
+    @objc public let jwsRepresentation: String?
 
-    public init(success: Bool, errorMessage: String? = nil, errorCode: Int32 = 0, data: NSArray? = nil) {
+    public init(success: Bool, errorMessage: String? = nil, errorCode: Int32 = 0, data: NSArray? = nil, jwsRepresentation: String? = nil) {
         self.success = success
         self.errorMessage = errorMessage
         self.errorCode = errorCode
         self.data = data
+        self.jwsRepresentation = jwsRepresentation
         super.init()
     }
 }
 
-// MARK: - @objc callback type aliases
-public typealias StoreKitInitCallback = (StoreKitResult) -> Void
-public typealias StoreKitProductsCallback = (StoreKitResult) -> Void
-public typealias StoreKitPurchaseCallback = (StoreKitResult) -> Void
+// MARK: - Callback type aliases
+
+public typealias StoreKitInitCallback           = (StoreKitResult) -> Void
+public typealias StoreKitProductsCallback       = (StoreKitResult) -> Void
+public typealias StoreKitPurchaseCallback       = (StoreKitResult) -> Void
 public typealias StoreKitPurchaseUpdateCallback = (StoreKitPurchase) -> Void
 
-// MARK: - Internal StoreKit 2 Manager
+// MARK: - StoreKit 2 Manager
+
 @available(iOS 15.0, *)
 internal class StoreKitManager {
 
     private var products: [Product] = []
     private var purchaseUpdateCallback: StoreKitPurchaseUpdateCallback?
     private var transactionListener: Task<Void, Never>?
+    private var handledTransactionIds: Set<UInt64> = []
+    private var currentUserId: UUID?
 
     static let shared = StoreKitManager()
 
     private init() {
+        Task {
+            await drainStaleTransactionsAtLaunch()
+        }
         startTransactionListener()
     }
 
@@ -83,90 +99,132 @@ internal class StoreKitManager {
         transactionListener?.cancel()
     }
 
-    // MARK: - iOS Version Check
-    private func isStoreKit2Available() -> Bool {
-        return true
-    }
+    // MARK: - Launch Drain
 
-    private func checkiOSVersion() -> Bool {
-        if #available(iOS 15.0, *) {
-            return isStoreKit2Available()
-        } else {
-            return false
+    private func drainStaleTransactionsAtLaunch() async {
+        var count = 0
+        for await result in Transaction.unfinished {
+            do {
+                let transaction = try checkVerified(result)
+
+                if transaction.revocationDate != nil {
+                    print("🚫 [IAP] Launch drain: finishing revoked \(transaction.id) (\(transaction.productID))")
+                    await transaction.finish()
+                    count += 1
+                    continue
+                }
+
+                if transaction.appAccountToken != nil {
+                    print("🧹 [IAP] Launch drain: finishing orphaned \(transaction.id) (\(transaction.productID)) token=\(transaction.appAccountToken!)")
+                    await transaction.finish()
+                    count += 1
+                    continue
+                }
+
+                print("⏭️ [IAP] Launch drain: leaving legacy transaction \(transaction.id)")
+
+            } catch {
+                if case .unverified(let t, _) = result {
+                    print("⚠️ [IAP] Launch drain: finishing unverified transaction")
+                    await t.finish()
+                    count += 1
+                }
+            }
         }
+        print("✅ [IAP] Launch drain complete — cleared \(count) stale transaction(s)")
     }
 
     // MARK: - Transaction Listener
+
     private func startTransactionListener() {
         transactionListener = Task {
             for await result in Transaction.updates {
                 do {
                     let transaction = try checkVerified(result)
-                    await handleTransaction(transaction)
+
+                    if handledTransactionIds.contains(transaction.id) {
+                        print("⏭️ [IAP] Listener: skipping already-handled \(transaction.id)")
+                        await transaction.finish()
+                        continue
+                    }
+
+                    if transaction.revocationDate != nil {
+                        print("🚫 [IAP] Listener: finishing revoked \(transaction.id)")
+                        await transaction.finish()
+                        continue
+                    }
+
+                    if let currentUUID = currentUserId,
+                       let transactionToken = transaction.appAccountToken,
+                       transactionToken != currentUUID {
+                        print("🧹 [IAP] Listener: draining foreign \(transaction.id)")
+                        await transaction.finish()
+                        continue
+                    }
+
+                    if #available(iOS 17.0, *) {
+                        if transaction.reason == .renewal {
+                            print("🔕 [IAP] Listener: finishing renewal \(transaction.id)")
+                            await transaction.finish()
+                            continue
+                        }
+                    } else {
+                        let age = Date().timeIntervalSince(transaction.purchaseDate)
+                        if age > 60 {
+                            print("🔕 [IAP] Listener: finishing old \(transaction.id) (age \(Int(age))s)")
+                            await transaction.finish()
+                            continue
+                        }
+                    }
+
+                    print("⚠️ [IAP] Listener: unhandled \(transaction.id)")
+
                 } catch {
-                    print("Transaction verification failed: \(error)")
+                    print("⚠️ [IAP] Listener: verification failed: \(error)")
                 }
             }
         }
     }
 
+    // MARK: - Helpers
+
+    private func checkiOSVersion() -> Bool {
+        if #available(iOS 15.0, *) { return true }
+        return false
+    }
+
     private func checkVerified<T>(_ result: VerificationResult<T>) throws -> T {
         switch result {
-        case .unverified:
-            throw StoreError.failedVerification
-        case .verified(let safe):
-            return safe
+        case .unverified: throw StoreError.failedVerification
+        case .verified(let safe): return safe
         }
     }
 
-    private func handleTransaction(_ transaction: Transaction) async {
-        guard let callback = purchaseUpdateCallback else { return }
-
-        let purchase = StoreKitPurchase(
-            productId: transaction.productID,
-            purchaseToken: String(transaction.id),
-            orderId: String(transaction.id),
-            purchaseTime: Int64(transaction.purchaseDate.timeIntervalSince1970 * 1000),
-            isAcknowledged: true,
-            originalJson: "",
-            signature: ""
-        )
-
-        callback(purchase)
-
-        // Finish the transaction
-        await transaction.finish()
-    }
-
-    // MARK: - Internal methods with @objc callbacks
+    // MARK: - Initialize
 
     func initialize(callback: @escaping StoreKitInitCallback) {
         guard checkiOSVersion() else {
-            let result = StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1)
-            callback(result)
+            callback(StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1))
             return
         }
-
-        let result = StoreKitResult(success: true)
-        callback(result)
+        callback(StoreKitResult(success: true))
     }
+
+    // MARK: - Get Products
 
     func getProducts(productIds: [String], callback: @escaping StoreKitProductsCallback) {
         guard checkiOSVersion() else {
-            let result = StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1)
-            callback(result)
+            callback(StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1))
             return
         }
-
         Task {
             do {
                 let storeProducts = try await Product.products(for: productIds)
                 self.products = storeProducts
-
                 let productArray = NSMutableArray()
                 for product in storeProducts {
                     let priceAmountMicros = Int64((product.price as NSDecimalNumber).doubleValue * 1_000_000)
-                    let storeKitProduct = StoreKitProduct(
+                    productArray.add(StoreKitProduct(
                         id: product.id,
                         displayName: product.displayName,
                         description: product.description,
@@ -174,128 +232,258 @@ internal class StoreKitManager {
                         currencyCode: product.priceFormatStyle.currencyCode ?? "",
                         priceAmountMicros: priceAmountMicros,
                         type: product.type == .consumable || product.type == .nonConsumable ? "inapp" : "subs"
-                    )
-                    productArray.add(storeKitProduct)
+                    ))
                 }
-
-                let result = StoreKitResult(success: true, data: productArray)
-                callback(result)
+                callback(StoreKitResult(success: true, data: productArray))
             } catch {
-                let result = StoreKitResult(success: false, errorMessage: error.localizedDescription, errorCode: -1)
-                callback(result)
+                callback(StoreKitResult(success: false, errorMessage: error.localizedDescription, errorCode: -1))
             }
         }
     }
 
-    func launchPurchaseFlow(productId: String, callback: @escaping StoreKitPurchaseCallback) {
+    // MARK: - Switch User
+
+    func switchUser(newUserId: String?, callback: ((Bool) -> Void)? = nil) {
+        let newUUID = newUserId.flatMap { UUID(uuidString: $0) }
+        print("🔀 [IAP] switchUser → \(newUserId ?? "nil") → UUID: \(String(describing: newUUID))")
+        currentUserId = newUUID
+        handledTransactionIds.removeAll()
+
+        Task {
+            await drainStaleTransactionsAtLaunch()
+            do {
+                try await AppStore.sync()
+                print("✅ [IAP] AppStore.sync() completed")
+            } catch {
+                print("⚠️ [IAP] AppStore.sync() failed: \(error)")
+            }
+            callback?(true)
+        }
+    }
+
+    // MARK: - Launch Purchase Flow
+
+    func launchPurchaseFlow(productId: String, userId: String?, callback: @escaping StoreKitPurchaseCallback) {
         guard checkiOSVersion() else {
-            let result = StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1)
-            callback(result)
+            callback(StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1))
+            return
+        }
+        guard let product = products.first(where: { $0.id == productId }) else {
+            callback(StoreKitResult(success: false, errorMessage: "Product not found: \(productId)", errorCode: -1))
             return
         }
 
-        guard let product = products.first(where: { $0.id == productId }) else {
-            let result = StoreKitResult(success: false, errorMessage: "Product not found", errorCode: -1)
-            callback(result)
-            return
+        let currentUserUUID: UUID? = userId.flatMap { UUID(uuidString: $0) }
+        self.currentUserId = currentUserUUID
+
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        print("💳 [IAP] launchPurchaseFlow")
+        print("💳 [IAP] productId        = \(productId)")
+        print("💳 [IAP] userId (raw)     = \(userId ?? "nil")")
+        print("💳 [IAP] currentUserUUID  = \(String(describing: currentUserUUID))")
+        print("💳 [IAP] UUID parse OK    = \(currentUserUUID != nil)")
+        print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        if currentUserUUID == nil && userId != nil {
+            print("⚠️ [IAP] WARNING: userId '\(userId!)' could NOT be parsed as a UUID!")
+            print("⚠️ [IAP] appAccountToken will NOT be set — token mismatch check will be skipped")
         }
 
         Task {
-            do {
-                let result = try await product.purchase()
-
-                switch result {
-                case .success(let verification):
-                    let transaction = try checkVerified(verification)
-                    await transaction.finish()
-
-                    let storeKitResult = StoreKitResult(success: true)
-                    callback(storeKitResult)
-
-                case .userCancelled:
-                    let storeKitResult = StoreKitResult(success: false, errorMessage: "User cancelled", errorCode: 2)
-                    callback(storeKitResult)
-
-                case .pending:
-                    let storeKitResult = StoreKitResult(success: false, errorMessage: "Purchase pending", errorCode: 3)
-                    callback(storeKitResult)
-
-                @unknown default:
-                    let storeKitResult = StoreKitResult(success: false, errorMessage: "Unknown result", errorCode: -1)
-                    callback(storeKitResult)
-                }
-            } catch {
-                let storeKitResult = StoreKitResult(success: false, errorMessage: error.localizedDescription, errorCode: -1)
-                callback(storeKitResult)
-            }
+            await drainStaleTransactionsAtLaunch()
+            await performPurchase(
+                product: product,
+                currentUserUUID: currentUserUUID,
+                callback: callback
+            )
         }
     }
 
-    func consumePurchase(purchaseToken: String, callback: @escaping StoreKitPurchaseCallback) {
-        // In StoreKit 2, consumables are automatically consumed when the transaction is finished
-        let result = StoreKitResult(success: true)
-        callback(result)
+    // MARK: - Perform Purchase
+    //
+    // Token mismatch: NO retry. Log everything and fail fast so we can
+    // diagnose exactly what UUID is in the transaction vs what we sent.
+
+    private func performPurchase(
+        product: Product,
+        currentUserUUID: UUID?,
+        callback: @escaping StoreKitPurchaseCallback
+    ) async {
+        do {
+            var options: Set<Product.PurchaseOption> = []
+            if let uuid = currentUserUUID {
+                options.insert(.appAccountToken(uuid))
+                print("🔧 [IAP] Purchase option: appAccountToken = \(uuid)")
+            } else {
+                print("⚠️ [IAP] Purchase option: NO appAccountToken set (userId was nil or not a valid UUID)")
+            }
+
+            let purchaseResult = options.isEmpty
+                ? try await product.purchase()
+                : try await product.purchase(options: options)
+
+            switch purchaseResult {
+            case .success(let verification):
+                let jwsRepresentation = verification.jwsRepresentation
+                let transaction = try checkVerified(verification)
+
+                print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                print("✅ [IAP] Transaction received from StoreKit")
+                print("✅ [IAP] transaction.id              = \(transaction.id)")
+                print("✅ [IAP] transaction.productID       = \(transaction.productID)")
+                print("✅ [IAP] transaction.appAccountToken = \(String(describing: transaction.appAccountToken))")
+                print("✅ [IAP] currentUserUUID             = \(String(describing: currentUserUUID))")
+                print("✅ [IAP] transaction.purchaseDate    = \(transaction.purchaseDate)")
+                print("✅ [IAP] transaction.revocationDate  = \(String(describing: transaction.revocationDate))")
+
+                // Token mismatch check — NO retry, just log and decide
+                if let currentUUID = currentUserUUID,
+                   let transactionToken = transaction.appAccountToken {
+
+                    let matches = transactionToken == currentUUID
+                    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                    print("🔍 [IAP] TOKEN COMPARISON")
+                    print("🔍 [IAP] currentUserUUID     = \(currentUUID)")
+                    print("🔍 [IAP] transactionToken    = \(transactionToken)")
+                    print("🔍 [IAP] tokens match        = \(matches)")
+                    print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+                    if !matches {
+                        // NO retry — finish this transaction and surface the error
+                        // so we can see in logs exactly what UUIDs don't match
+                        print("❌ [IAP] TOKEN MISMATCH — finishing transaction and failing")
+                        print("❌ [IAP] This transaction belongs to a different app user")
+                        print("❌ [IAP] Expected: \(currentUUID)")
+                        print("❌ [IAP] Got:      \(transactionToken)")
+                        await transaction.finish()
+                        callback(StoreKitResult(
+                            success: false,
+                            errorMessage: "Token mismatch: expected \(currentUUID) got \(transactionToken)",
+                            errorCode: -1
+                        ))
+                        return
+                    }
+                } else {
+                    // Log why token check was skipped
+                    print("ℹ️ [IAP] Token check SKIPPED")
+                    print("ℹ️ [IAP] currentUserUUID         = \(String(describing: currentUserUUID))")
+                    print("ℹ️ [IAP] transaction.appToken    = \(String(describing: transaction.appAccountToken))")
+                    if currentUserUUID == nil {
+                        print("ℹ️ [IAP] Reason: no currentUserUUID — userId was nil or not a valid UUID")
+                    } else {
+                        print("ℹ️ [IAP] Reason: transaction has no appAccountToken (legacy purchase)")
+                    }
+                }
+
+                // Valid purchase — finish before notifying Kotlin
+                handledTransactionIds.insert(transaction.id)
+                await transaction.finish()
+                print("✅ [IAP] Transaction \(transaction.id) finished successfully")
+
+                purchaseUpdateCallback?(StoreKitPurchase(
+                    productId: transaction.productID,
+                    purchaseToken: String(transaction.id),
+                    orderId: String(transaction.id),
+                    purchaseTime: Int64(transaction.purchaseDate.timeIntervalSince1970 * 1000),
+                    isAcknowledged: true,
+                    originalJson: "",
+                    signature: "",
+                    transactionId: String(transaction.id),
+                    jwsRepresentation: jwsRepresentation,
+                    originalTransactionId: String(transaction.originalID)
+                ))
+
+                callback(StoreKitResult(success: true))
+
+            case .userCancelled:
+                print("🚫 [IAP] User cancelled purchase")
+                callback(StoreKitResult(success: false, errorMessage: "User cancelled", errorCode: 2))
+            case .pending:
+                print("⏳ [IAP] Purchase pending")
+                callback(StoreKitResult(success: false, errorMessage: "Purchase pending", errorCode: 3))
+            @unknown default:
+                callback(StoreKitResult(success: false, errorMessage: "Unknown result", errorCode: -1))
+            }
+        } catch {
+            print("❌ [IAP] Purchase threw error: \(error)")
+            callback(StoreKitResult(success: false, errorMessage: error.localizedDescription, errorCode: -1))
+        }
     }
 
-    func acknowledgePurchase(purchaseToken: String, callback: @escaping StoreKitPurchaseCallback) {
-        // In StoreKit 2, purchases are automatically acknowledged when the transaction is finished
-        let result = StoreKitResult(success: true)
-        callback(result)
+    // MARK: - Consume Purchase
+
+    func consumePurchase(purchaseToken: String, callback: @escaping StoreKitPurchaseCallback) {
+        Task {
+            for await result in Transaction.currentEntitlements {
+                if let t = try? checkVerified(result), String(t.id) == purchaseToken {
+                    await t.finish(); break
+                }
+            }
+            callback(StoreKitResult(success: true))
+        }
     }
+
+    // MARK: - Acknowledge Purchase
+
+    func acknowledgePurchase(purchaseToken: String, callback: @escaping StoreKitPurchaseCallback) {
+        Task {
+            for await result in Transaction.currentEntitlements {
+                if let t = try? checkVerified(result), String(t.id) == purchaseToken {
+                    await t.finish(); break
+                }
+            }
+            callback(StoreKitResult(success: true))
+        }
+    }
+
+    // MARK: - Get Purchases
 
     func getPurchases(callback: @escaping StoreKitProductsCallback) {
         guard checkiOSVersion() else {
-            let result = StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1)
-            callback(result)
+            callback(StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1))
             return
         }
-
         Task {
-            var purchases: [StoreKitPurchase] = []
-
+            let purchaseArray = NSMutableArray()
             for await result in Transaction.currentEntitlements {
                 do {
                     let transaction = try checkVerified(result)
-                    let purchase = StoreKitPurchase(
+                    if let currentUUID = currentUserId,
+                       let token = transaction.appAccountToken,
+                       token != currentUUID { continue }
+                    purchaseArray.add(StoreKitPurchase(
                         productId: transaction.productID,
                         purchaseToken: String(transaction.id),
                         orderId: String(transaction.id),
                         purchaseTime: Int64(transaction.purchaseDate.timeIntervalSince1970 * 1000),
                         isAcknowledged: true,
                         originalJson: "",
-                        signature: ""
-                    )
-                    purchases.append(purchase)
+                        signature: "",
+                        transactionId: String(transaction.id),
+                        jwsRepresentation: result.jwsRepresentation,
+                        originalTransactionId: String(transaction.originalID)
+                    ))
                 } catch {
-                    print("Transaction verification failed: \(error)")
+                    print("⚠️ [IAP] getPurchases: verification failed: \(error)")
                 }
             }
-
-            let purchaseArray = NSMutableArray()
-            for purchase in purchases {
-                purchaseArray.add(purchase)
-            }
-
-            let result = StoreKitResult(success: true, data: purchaseArray)
-            callback(result)
+            callback(StoreKitResult(success: true, data: purchaseArray))
         }
     }
 
+    // MARK: - Restore Purchases
+
     func restorePurchases(callback: @escaping StoreKitProductsCallback) {
         guard checkiOSVersion() else {
-            let result = StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1)
-            callback(result)
+            callback(StoreKitResult(success: false, errorMessage: "StoreKit 2 requires iOS 15.0 or later", errorCode: -1))
             return
         }
-
         Task {
             do {
                 try await AppStore.sync()
-                // After sync, get current purchases
                 getPurchases(callback: callback)
             } catch {
-                let result = StoreKitResult(success: false, errorMessage: error.localizedDescription, errorCode: -1)
-                callback(result)
+                callback(StoreKitResult(success: false, errorMessage: error.localizedDescription, errorCode: -1))
             }
         }
     }
@@ -309,18 +497,19 @@ internal class StoreKitManager {
         transactionListener = nil
         purchaseUpdateCallback = nil
         products.removeAll()
+        handledTransactionIds.removeAll()
+        currentUserId = nil
     }
 }
 
-// MARK: - Public @objc Wrapper for Kotlin
+// MARK: - Public @objc Wrapper
+
 @available(iOS 15.0, *)
 @objc public class StoreKitManagerWrapper: NSObject {
 
     private let manager = StoreKitManager.shared
 
-    @objc public override init() {
-        super.init()
-    }
+    @objc public override init() { super.init() }
 
     @objc public func initialize(completion: @escaping (StoreKitResult) -> Void) {
         manager.initialize(callback: completion)
@@ -330,8 +519,8 @@ internal class StoreKitManager {
         manager.getProducts(productIds: productIds, callback: completion)
     }
 
-    @objc public func launchPurchaseFlow(productId: String, completion: @escaping (StoreKitResult) -> Void) {
-        manager.launchPurchaseFlow(productId: productId, callback: completion)
+    @objc public func launchPurchaseFlow(productId: String, userId: String?, completion: @escaping (StoreKitResult) -> Void) {
+        manager.launchPurchaseFlow(productId: productId, userId: userId, callback: completion)
     }
 
     @objc public func consumePurchase(purchaseToken: String, completion: @escaping (StoreKitResult) -> Void) {
@@ -354,12 +543,17 @@ internal class StoreKitManager {
         manager.setPurchaseUpdateCallback(callback: callback)
     }
 
+    @objc public func switchUser(newUserId: String?, completion: ((Bool) -> Void)? = nil) {
+        manager.switchUser(newUserId: newUserId, callback: completion)
+    }
+
     @objc public func disconnect() {
         manager.disconnect()
     }
 }
 
-// MARK: - Error definitions
+// MARK: - Errors
+
 enum StoreError: Error {
     case failedVerification
 }

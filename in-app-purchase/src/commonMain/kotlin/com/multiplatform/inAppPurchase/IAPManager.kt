@@ -17,7 +17,8 @@ expect class IAPManager() {
 
     suspend fun launchPurchaseFlow(
         product: Product,
-        basePlanId: String? = null
+        basePlanId: String? = null,
+        userId: String? = null
     ): IAPResult<Unit>
 
     suspend fun consumePurchase(
