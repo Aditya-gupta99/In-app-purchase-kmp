@@ -358,6 +358,22 @@ actual class IAPManager actual constructor() {
     }
 
     /**
+     * Switch user context — call this on login/logout to set the current app user.
+     * Drains stale transactions from other users and syncs with App Store.
+     */
+    actual suspend fun switchUser(userId: String?): Unit = suspendCancellableCoroutine { continuation ->
+        println("🔀 [IAP] switchUser called with userId: $userId")
+
+        storeKitWrapper?.switchUserWithNewUserId(userId) { _ ->
+            println("✅ [IAP] switchUser completed")
+            continuation.resume(Unit)
+        } ?: run {
+            println("⚠️ [IAP] switchUser: StoreKitManagerWrapper not initialized, continuing anyway")
+            continuation.resume(Unit)
+        }
+    }
+
+    /**
      * Disconnect and cleanup
      */
     actual suspend fun disconnect() {

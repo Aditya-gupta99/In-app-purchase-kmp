@@ -37,5 +37,7 @@ expect class IAPManager() {
 
     fun getPurchaseUpdates(): Flow<Purchase>
 
+    suspend fun switchUser(userId: String?)
+
     suspend fun disconnect()
 }

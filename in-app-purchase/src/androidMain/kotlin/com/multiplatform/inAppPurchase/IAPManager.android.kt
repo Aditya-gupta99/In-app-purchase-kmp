@@ -464,6 +464,14 @@ actual class IAPManager actual constructor() {
         }
     }
 
+    /**
+     * Switch user context. On Android this is a no-op since Google Play
+     * handles user identity through the Google account.
+     */
+    actual suspend fun switchUser(userId: String?) {
+        // No-op on Android — Google Play billing is tied to the Google account
+    }
+
     actual suspend fun disconnect() {
         billingClient?.endConnection()
         billingClient = null

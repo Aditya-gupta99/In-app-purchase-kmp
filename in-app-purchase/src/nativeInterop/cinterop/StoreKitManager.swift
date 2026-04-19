@@ -89,9 +89,6 @@ internal class StoreKitManager {
     static let shared = StoreKitManager()
 
     private init() {
-        Task {
-            await drainStaleTransactionsAtLaunch()
-        }
         startTransactionListener()
     }
 
@@ -102,6 +99,11 @@ internal class StoreKitManager {
     // MARK: - Launch Drain
 
     private func drainStaleTransactionsAtLaunch() async {
+        guard let currentUUID = currentUserId else {
+            print("⏭️ [IAP] Launch drain: skipped — no currentUserId set")
+            return
+        }
+
         var count = 0
         for await result in Transaction.unfinished {
             do {
@@ -114,14 +116,16 @@ internal class StoreKitManager {
                     continue
                 }
 
-                if transaction.appAccountToken != nil {
-                    print("🧹 [IAP] Launch drain: finishing orphaned \(transaction.id) (\(transaction.productID)) token=\(transaction.appAccountToken!)")
+                // Finish transactions that belong to a DIFFERENT user
+                if let token = transaction.appAccountToken, token != currentUUID {
+                    print("🧹 [IAP] Launch drain: finishing foreign \(transaction.id) (\(transaction.productID)) token=\(token) != current=\(currentUUID)")
                     await transaction.finish()
                     count += 1
                     continue
                 }
 
-                print("⏭️ [IAP] Launch drain: leaving legacy transaction \(transaction.id)")
+                // Transactions with no token or matching token — leave them for recovery
+                print("⏭️ [IAP] Launch drain: keeping transaction \(transaction.id) (\(transaction.productID))")
 
             } catch {
                 if case .unverified(let t, _) = result {
@@ -250,6 +254,7 @@ internal class StoreKitManager {
         handledTransactionIds.removeAll()
 
         Task {
+            // Drain transactions that belong to other users now that currentUserId is set
             await drainStaleTransactionsAtLaunch()
             do {
                 try await AppStore.sync()
@@ -273,27 +278,49 @@ internal class StoreKitManager {
             return
         }
 
-        let currentUserUUID: UUID? = userId.flatMap { UUID(uuidString: $0) }
-        self.currentUserId = currentUserUUID
+        // Use userId to build purchase option but do NOT override currentUserId here.
+        // currentUserId should be set via switchUser() before calling this.
+        let purchaseUUID: UUID? = userId.flatMap { UUID(uuidString: $0) }
 
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         print("💳 [IAP] launchPurchaseFlow")
         print("💳 [IAP] productId        = \(productId)")
         print("💳 [IAP] userId (raw)     = \(userId ?? "nil")")
-        print("💳 [IAP] currentUserUUID  = \(String(describing: currentUserUUID))")
-        print("💳 [IAP] UUID parse OK    = \(currentUserUUID != nil)")
+        print("💳 [IAP] purchaseUUID     = \(String(describing: purchaseUUID))")
+        print("💳 [IAP] currentUserId    = \(String(describing: currentUserId))")
         print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        if currentUserUUID == nil && userId != nil {
+        if purchaseUUID == nil && userId != nil {
             print("⚠️ [IAP] WARNING: userId '\(userId!)' could NOT be parsed as a UUID!")
-            print("⚠️ [IAP] appAccountToken will NOT be set — token mismatch check will be skipped")
         }
 
         Task {
+            // Drain foreign transactions before purchase
             await drainStaleTransactionsAtLaunch()
+
+            // Check if user already has an active entitlement for this product
+            // from a different user. This prevents returning stale receipts.
+            for await result in Transaction.currentEntitlements {
+                if let t = try? checkVerified(result),
+                   t.productID == productId {
+                    // If the entitlement has a different appAccountToken, it belongs to another app user
+                    if let currentUUID = currentUserId,
+                       let entitlementToken = t.appAccountToken,
+                       entitlementToken != currentUUID {
+                        print("❌ [IAP] Existing entitlement for \(productId) belongs to different user (token=\(entitlementToken), current=\(currentUUID))")
+                        callback(StoreKitResult(
+                            success: false,
+                            errorMessage: "Product already owned by a different account",
+                            errorCode: 7 // ITEM_ALREADY_OWNED equivalent
+                        ))
+                        return
+                    }
+                }
+            }
+
             await performPurchase(
                 product: product,
-                currentUserUUID: currentUserUUID,
+                currentUserUUID: purchaseUUID,
                 callback: callback
             )
         }
